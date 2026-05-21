@@ -13,6 +13,7 @@ const MAX_ROUNDS = 8;
 const DEFAULT_ROUNDS = 4;
 const DEFAULT_TOOLS = "read,grep,find,ls";
 const RESEARCH_TOOLS = "read,grep,find,ls,bash,web_search,fetch_content,get_search_content,code_search";
+const PROTOTYPE_TOOL = "debate_scratch";
 const OUTPUT_CAP_BYTES = 80 * 1024;
 const DEFAULT_STRONG_MODEL = "gpt-5.5";
 const DEFAULT_JUNIOR_MODEL = "gpt-5.4-mini";
@@ -74,6 +75,24 @@ const DebateParams = Type.Object({
 				"Allow main expert agents to call the subagent tool directly by adding subagent to their tool list. Default false; --subagents alone only runs parent-orchestrated briefing subagents.",
 		}),
 	),
+	prototyping: Type.Optional(
+		Type.Boolean({
+			description:
+				"Give experts a debate_scratch tool for isolated throwaway code/timing experiments under the debate artifact directory. Default false.",
+		}),
+	),
+	htmlReport: Type.Optional(
+		Type.Boolean({
+			description:
+				"Write a self-contained HTML report with workflow, research/prototype artifacts, critiques, synthesis, and final resolution. Default false for tool calls; --workshop enables it for slash commands.",
+		}),
+	),
+	workshop: Type.Optional(
+		Type.Boolean({
+			description:
+				"Convenience mode for RLM-style ideation: enables parent briefs, direct expert subagents, prototyping, research, and HTML report unless explicitly overridden. Slash command flag: --workshop.",
+		}),
+	),
 });
 
 type ExpertInput = Static<typeof ExpertSchema>;
@@ -97,6 +116,7 @@ type DebateResult = {
 	transcriptPath: string;
 	resolutionPath: string;
 	workflowPath: string;
+	reportPath?: string;
 	experts: string[];
 	subagentWorkflow: string[];
 };
@@ -175,6 +195,39 @@ async function writeFileQueued(filePath: string, content: string): Promise<void>
 		await fs.mkdir(path.dirname(filePath), { recursive: true });
 		await fs.writeFile(filePath, content, "utf8");
 	});
+}
+
+function safeSegment(text: string): string {
+	return text.toLowerCase().replace(/[^a-z0-9_.-]+/g, "-").replace(/^-|-$/g, "").slice(0, 80) || "item";
+}
+
+function assertInside(parent: string, child: string): void {
+	const rel = path.relative(parent, child);
+	if (rel.startsWith("..") || path.isAbsolute(rel)) throw new Error(`Path escapes scratch directory: ${child}`);
+}
+
+function escapeHtml(text: string): string {
+	return text
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;")
+		.replace(/'/g, "&#39;");
+}
+
+async function listFilesRecursive(root: string): Promise<string[]> {
+	const files: string[] = [];
+	async function walk(dir: string) {
+		let entries: fssync.Dirent[] = [];
+		try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch { return; }
+		for (const entry of entries) {
+			const full = path.join(dir, entry.name);
+			if (entry.isDirectory()) await walk(full);
+			else files.push(full);
+		}
+	}
+	await walk(root);
+	return files.sort();
 }
 
 function extractAssistantText(message: any): string {
@@ -313,7 +366,7 @@ async function runChildPi(options: {
 			const eventType = String(event.type ?? "");
 			const toolName = event.toolName ?? event.name ?? event.message?.toolName;
 			if ((eventType.includes("tool") || eventType.includes("Tool")) && toolName) {
-				options.onActivity?.(toolName === "subagent" ? "MAIN EXPERT called subagent tool" : `tool: ${toolName}`);
+				options.onActivity?.(toolName === "subagent" ? "MAIN EXPERT called subagent tool" : toolName === PROTOTYPE_TOOL ? "ran scratch/prototype experiment" : `tool: ${toolName}`);
 			}
 			if (eventType === "message_update") {
 				const preview = extractAssistantText(event.message ?? event.assistantMessage ?? {}).split("\n").find(Boolean);
@@ -385,8 +438,9 @@ function intensityRules(intensity: Intensity): string {
 	].join("\n");
 }
 
-function expertSystemPrompt(expert: ExpertInput, intensity: Intensity, tools: string, parentBriefsEnabled: boolean): string {
+function expertSystemPrompt(expert: ExpertInput, intensity: Intensity, tools: string, parentBriefsEnabled: boolean, prototypingEnabled: boolean, debateDir?: string): string {
 	const canCallSubagents = toolListIncludes(tools, "subagent");
+	const canPrototype = prototypingEnabled && toolListIncludes(tools, PROTOTYPE_TOOL);
 	return `# Expert Ideation Panelist: ${expert.name}
 
 ${expert.stance}
@@ -400,6 +454,7 @@ Available tools for this run: ${tools}
 Subagent / delegation policy:
 - Parent-orchestrated assistant briefs: ${parentBriefsEnabled ? "ENABLED. Any assistant-brief files were run by the parent orchestrator before you speak; they are junior input, not your own tool calls." : "DISABLED. No parent-run assistant briefs are expected."}
 - Main-expert direct subagent calls: ${canCallSubagents ? "ENABLED because the subagent tool is in your available tools. Use it only for narrow research/verification; report when you used it and remain responsible for judgment." : "DISABLED. You cannot launch subagents in this run. Do not claim you used them."}
+- Scratch/prototype experiments: ${canPrototype ? `ENABLED via ${PROTOTYPE_TOOL}. Use it for throwaway code, timing checks, small simulations, parsing experiments, or executable sanity checks. Debate dir: ${debateDir ?? "(not supplied)"}` : "DISABLED. Do not claim you ran code experiments unless you actually used a tool."}
 
 Tool policy:
 - Default tools are read/search only: read, grep, find, ls.
@@ -407,6 +462,7 @@ Tool policy:
 - If a web/search tool is installed and explicitly included in available tools, you may use it.
 - If subagent is explicitly included in available tools, you may delegate only narrow research/verification tasks; you remain responsible for final judgment.
 - If subagent is not in available tools, do not pretend you used it.
+- If debate_scratch is included, keep generated code/data small and disposable. Cite the scratch artifact paths and important command output in your critique.
 
 Rules:
 - Stay in your authority lane, but name cross-lane risks.
@@ -507,6 +563,8 @@ function buildRoundPrompt(args: {
 	expertName: string;
 	panelExperts: ExpertInput[];
 	assistantBriefPaths: string[];
+	prototyping: boolean;
+	debateDir: string;
 }): string {
 	const context = args.contextPaths.length ? args.contextPaths.map((p) => `- ${p}`).join("\n") : "- (none supplied)";
 	const panel = args.panelExperts.map((e) => `- ${e.name}: ${e.stance}`).join("\n");
@@ -538,6 +596,9 @@ Parent-orchestrated assistant briefs for your lane:
 ${args.assistantBriefPaths.length ? args.assistantBriefPaths.map((p) => `- ${p}`).join("\n") : "- none"}
 
 If assistant briefs are present, read them before finalizing your critique. These subagents were launched by the parent orchestrator before your critique; they are not evidence that you personally called subagents. Treat them as junior research/scouting input, not authority. You own judgment and must correct or ignore weak brief claims.
+
+Scratch/prototype workspace:
+${args.prototyping ? `- Enabled. Use ${PROTOTYPE_TOOL} with debateDir=${args.debateDir} and expertName=${args.expertName}. Cite generated artifact paths and key outputs.` : "- Disabled."}
 
 Write your answer in the strict format. End with exactly one VERDICT line.`;
 }
@@ -731,6 +792,78 @@ async function formatTranscript(roundFiles: string[], finalSynthesis: string): P
 	return chunks.join("\n");
 }
 
+async function generateHtmlReport(args: {
+	debateDir: string;
+	ideaPath: string;
+	workflowPath: string;
+	answersPath: string;
+	finalPath: string;
+	transcriptPath: string;
+	roundFiles: string[];
+	result: Omit<DebateResult, "summary" | "reportPath">;
+}): Promise<string> {
+	const reportPath = path.join(args.debateDir, "report.html");
+	const scratchRoot = path.join(args.debateDir, "scratch");
+	const scratchFiles = (await listFilesRecursive(scratchRoot)).filter((file) => file.endsWith(".md") || file.endsWith(".py") || file.endsWith(".ts") || file.endsWith(".js") || file.endsWith(".txt"));
+	const read = async (file: string) => fs.readFile(file, "utf8").catch((err) => `[could not read ${file}: ${String(err)}]`);
+	const idea = await read(args.ideaPath);
+	const workflow = await read(args.workflowPath);
+	const answers = await read(args.answersPath);
+	const final = await read(args.finalPath);
+	const fileSection = async (title: string, files: string[]) => {
+		const parts: string[] = [];
+		for (const file of files) {
+			const content = await read(file);
+			parts.push(`<details><summary>${escapeHtml(title)}: ${escapeHtml(path.relative(args.debateDir, file))}</summary><pre>${escapeHtml(content)}</pre></details>`);
+		}
+		return parts.join("\n");
+	};
+	const html = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Technical debate report — ${escapeHtml(args.result.status)}</title>
+<style>
+:root { color-scheme: light dark; --fg:#172033; --muted:#657084; --bg:#f6f8fb; --card:#fff; --border:#d8dee9; --accent:#3b82f6; --ok:#16a34a; --warn:#d97706; }
+@media (prefers-color-scheme: dark) { :root { --fg:#e5e7eb; --muted:#9ca3af; --bg:#111827; --card:#1f2937; --border:#374151; --accent:#60a5fa; --ok:#22c55e; --warn:#f59e0b; } }
+body { margin:0; font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--fg); background:var(--bg); }
+main { max-width:1120px; margin:0 auto; padding:32px 20px 64px; }
+h1,h2,h3 { line-height:1.15; }
+.card, details { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:16px; margin:16px 0; box-shadow:0 1px 2px rgba(0,0,0,.04); }
+.grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; }
+.metric { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:14px; }
+.metric b { display:block; font-size:20px; color:var(--accent); }
+pre { white-space:pre-wrap; overflow:auto; background:rgba(127,127,127,.10); padding:12px; border-radius:8px; }
+summary { cursor:pointer; font-weight:650; }
+.path { color:var(--muted); font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px; }
+.badge { display:inline-block; padding:3px 8px; border-radius:999px; background:rgba(59,130,246,.14); color:var(--accent); font-weight:650; }
+.ok { color:var(--ok); } .warn { color:var(--warn); }
+</style>
+</head>
+<body><main>
+<h1>Technical debate report <span class="badge">${escapeHtml(args.result.status)}</span></h1>
+<p class="path">${escapeHtml(args.debateDir)}</p>
+<div class="grid">
+  <div class="metric"><span>Status</span><b>${escapeHtml(args.result.status)}</b></div>
+  <div class="metric"><span>Converged</span><b class="${args.result.converged ? "ok" : "warn"}">${args.result.converged ? "yes" : "no"}</b></div>
+  <div class="metric"><span>Rounds</span><b>${args.result.roundsRun}</b></div>
+  <div class="metric"><span>Experts</span><b>${escapeHtml(String(args.result.experts.length))}</b></div>
+</div>
+<section class="card"><h2>Original goal / prompt</h2><pre>${escapeHtml(idea)}</pre></section>
+<section class="card"><h2>Workflow and delegation policy</h2><pre>${escapeHtml(workflow)}</pre></section>
+<section class="card"><h2>Final resolution</h2><pre>${escapeHtml(final)}</pre></section>
+<section class="card"><h2>User answers / rulings</h2><pre>${escapeHtml(answers)}</pre></section>
+<h2>Prototype and scratch evidence</h2>
+${scratchFiles.length ? await fileSection("scratch", scratchFiles) : `<p class="card">No scratch/prototype artifacts were recorded.</p>`}
+<h2>Panel work products</h2>
+${await fileSection("artifact", args.roundFiles)}
+<section class="card"><h2>Raw transcript</h2><p class="path">${escapeHtml(args.transcriptPath)}</p></section>
+</main></body></html>`;
+	await writeFileQueued(reportPath, html);
+	return reportPath;
+}
+
 async function askUserForQuestions(ctx: any, round: number, questions: string[], answersPath: string): Promise<boolean> {
 	if (!ctx.hasUI || questions.length === 0) return false;
 	const prefill = questions.map((q, i) => `Q${i + 1}: ${q}\nA${i + 1}: `).join("\n\n");
@@ -755,6 +888,12 @@ async function runDebate(
 	const baseCwd = resolveMaybe(ctx.cwd, params.cwd ?? ".");
 	const rounds = Math.max(1, Math.min(MAX_ROUNDS, params.rounds ?? DEFAULT_ROUNDS));
 	const intensity = (params.intensity ?? "ruthless") as Intensity;
+	const workshop = Boolean(params.workshop);
+	const researchEnabled = Boolean(params.research || workshop);
+	const parentBriefsEnabled = Boolean(params.subagents || workshop);
+	const expertSubagentsEnabled = Boolean(params.expertSubagents || workshop);
+	const prototypingEnabled = Boolean(params.prototyping || workshop);
+	const htmlReportEnabled = Boolean(params.htmlReport || workshop);
 	const inheritedModel = activeModelRef(ctx);
 	const inheritedProvider = activeProvider(ctx);
 	const strongModel = params.strongModel ?? inheritedModel ?? DEFAULT_STRONG_MODEL;
@@ -793,7 +932,7 @@ async function runDebate(
 			userPrompt: buildPlannerPrompt(ideaPath, contextPaths),
 			cwd: baseCwd,
 			model: plannerModel,
-			tools: params.research ? RESEARCH_TOOLS : DEFAULT_TOOLS,
+			tools: researchEnabled ? RESEARCH_TOOLS : DEFAULT_TOOLS,
 			signal,
 			runDir: debateDir,
 			onProgress: onUpdate,
@@ -804,30 +943,38 @@ async function runDebate(
 		if (planned) experts = planned;
 		onPanelEvent?.({ type: "planner_done", experts: experts.map((e) => e.name), path: planPath });
 	}
-	const baseExpertTools = params.research ? RESEARCH_TOOLS : DEFAULT_TOOLS;
+	const baseExpertTools = researchEnabled ? RESEARCH_TOOLS : DEFAULT_TOOLS;
 	experts = experts.slice(0, 4).map((expert) => {
-		const baseTools = expert.tools ?? baseExpertTools;
+		let tools = expert.tools ?? baseExpertTools;
+		if (expertSubagentsEnabled) tools = withTool(tools, "subagent");
+		if (prototypingEnabled) tools = withTool(tools, PROTOTYPE_TOOL);
 		return {
 			...expert,
 			model: expert.model ?? expertModel,
-			tools: params.expertSubagents ? withTool(baseTools, "subagent") : baseTools,
+			tools,
 		};
 	});
 	const mainExpertsCanUseSubagents = experts.some((expert) => toolListIncludes(expert.tools, "subagent"));
 	const subagentWorkflow = [
-		`Parent-orchestrated assistant briefs (--subagents): ${params.subagents ? "enabled" : "disabled"}`,
+		`Workshop mode (--workshop): ${workshop ? "enabled" : "disabled"}`,
+		`Parent-orchestrated assistant briefs (--subagents): ${parentBriefsEnabled ? "enabled" : "disabled"}`,
 		`Main expert direct subagent tool: ${mainExpertsCanUseSubagents ? "enabled" : "disabled"}`,
-		params.subagents
+		`Scratch/prototype tool (${PROTOTYPE_TOOL}): ${prototypingEnabled ? "enabled" : "disabled"}`,
+		`HTML report: ${htmlReportEnabled ? "enabled" : "disabled"}`,
+		parentBriefsEnabled
 			? "Before each expert critique, the parent runs scout/researcher briefs and passes brief files to experts."
 			: "No parent-run junior briefs will be created unless --subagents/subagents=true is used.",
 		mainExpertsCanUseSubagents
 			? "If an expert calls subagent directly, dashboard activity will show 'MAIN EXPERT called subagent tool' when JSON tool events expose it."
-			: "In the default slash workflow, main experts cannot call subagents; use --expert-subagents or explicit expert.tools='...,subagent' to allow that.",
+			: "In the default slash workflow, main experts cannot call subagents; use --expert-subagents/--workshop or explicit expert.tools='...,subagent' to allow that.",
+		prototypingEnabled
+			? `Experts can run throwaway experiments through ${PROTOTYPE_TOOL}; artifacts are under scratch/<expert>/ and included in report.html.`
+			: `Experts cannot run scratch experiments unless --prototype/--workshop or prototyping=true is used.`,
 	];
 	await writeFileQueued(workflowPath, `# Technical debate workflow\n\n${subagentWorkflow.map((line) => `- ${line}`).join("\n")}\n\n## Expert tools\n\n${experts.map((expert) => `- ${expert.name}: ${expert.tools}`).join("\n")}\n`);
 	allRoundFiles.push(workflowPath);
 	onPanelEvent?.({ type: "delegation_policy", lines: subagentWorkflow });
-	onUpdate?.(`Subagent policy: ${params.subagents ? "parent-run briefs enabled" : "parent-run briefs disabled"}; main expert subagent tool ${mainExpertsCanUseSubagents ? "enabled" : "disabled"}.`);
+	onUpdate?.(`Workflow: parent briefs ${parentBriefsEnabled ? "enabled" : "disabled"}; main expert subagents ${mainExpertsCanUseSubagents ? "enabled" : "disabled"}; prototypes ${prototypingEnabled ? "enabled" : "disabled"}; HTML ${htmlReportEnabled ? "enabled" : "disabled"}.`);
 
 	let previousSynthesisPath: string | undefined;
 	let status: ResolutionStatus = "UNRESOLVED";
@@ -839,7 +986,7 @@ async function runDebate(
 		onPanelEvent?.({ type: "round_start", round, rounds, experts: experts.map((e) => e.name) });
 		onUpdate?.(`Round ${round}/${rounds}: expert critique`);
 		const assistantBriefs = new Map<string, string[]>();
-		if (params.subagents) {
+		if (parentBriefsEnabled) {
 			onUpdate?.(`Round ${round}/${rounds}: assistant subagent briefs`);
 			await Promise.all(experts.map(async (expert) => {
 				onPanelEvent?.({ type: "brief_start", round, name: expert.name });
@@ -852,7 +999,7 @@ async function runDebate(
 						contextPaths,
 						baseCwd,
 						debateDir,
-						research: Boolean(params.research),
+						research: researchEnabled,
 						juniorModel,
 						signal,
 						onUpdate,
@@ -885,7 +1032,7 @@ async function runDebate(
 					onPanelEvent?.({ type: "expert_start", round, name: expert.name });
 					const run = await runChildPi({
 						name: expert.name,
-						systemPrompt: expertSystemPrompt(expert, intensity, expert.tools ?? DEFAULT_TOOLS, Boolean(params.subagents)),
+						systemPrompt: expertSystemPrompt(expert, intensity, expert.tools ?? DEFAULT_TOOLS, parentBriefsEnabled, prototypingEnabled, debateDir),
 						userPrompt: buildRoundPrompt({
 							round,
 							maxRounds: rounds,
@@ -899,6 +1046,8 @@ async function runDebate(
 							expertName: expert.name,
 							panelExperts: experts,
 							assistantBriefPaths: assistantBriefs.get(expert.name) ?? [],
+							prototyping: prototypingEnabled,
+							debateDir,
 						}),
 						cwd: baseCwd,
 						model: expert.model,
@@ -920,7 +1069,7 @@ async function runDebate(
 				onPanelEvent?.({ type: "expert_start", round, name: expert.name });
 				const run = await runChildPi({
 					name: expert.name,
-					systemPrompt: expertSystemPrompt(expert, intensity, expert.tools ?? DEFAULT_TOOLS, Boolean(params.subagents)),
+					systemPrompt: expertSystemPrompt(expert, intensity, expert.tools ?? DEFAULT_TOOLS, parentBriefsEnabled, prototypingEnabled, debateDir),
 					userPrompt: buildRoundPrompt({
 						round,
 						maxRounds: rounds,
@@ -934,6 +1083,8 @@ async function runDebate(
 						expertName: expert.name,
 						panelExperts: experts,
 						assistantBriefPaths: assistantBriefs.get(expert.name) ?? [],
+						prototyping: prototypingEnabled,
+						debateDir,
 					}),
 					cwd: baseCwd,
 					model: expert.model,
@@ -969,7 +1120,7 @@ async function runDebate(
 			}),
 			cwd: baseCwd,
 			model: synthModel,
-			tools: params.research ? RESEARCH_TOOLS : DEFAULT_TOOLS,
+			tools: researchEnabled ? RESEARCH_TOOLS : DEFAULT_TOOLS,
 			signal,
 			runDir: debateDir,
 			onProgress: onUpdate,
@@ -995,6 +1146,31 @@ async function runDebate(
 	await writeFileQueued(finalPath, finalText);
 	await writeFileQueued(transcriptPath, await formatTranscript(allRoundFiles, finalPath));
 
+	let reportPath: string | undefined;
+	const resultBase = {
+		status,
+		converged,
+		roundsRun,
+		debateDir,
+		transcriptPath,
+		resolutionPath: finalPath,
+		workflowPath,
+		experts: experts.map((e) => e.name),
+		subagentWorkflow,
+	};
+	if (htmlReportEnabled) {
+		reportPath = await generateHtmlReport({
+			debateDir,
+			ideaPath,
+			workflowPath,
+			answersPath,
+			finalPath,
+			transcriptPath,
+			roundFiles: allRoundFiles,
+			result: resultBase,
+		});
+	}
+
 	const summary = [
 		`# Expert panel resolution`,
 		``,
@@ -1005,6 +1181,7 @@ async function runDebate(
 		`Artifacts:`,
 		`- Resolution: ${finalPath}`,
 		`- Workflow: ${workflowPath}`,
+		reportPath ? `- HTML report: ${reportPath}` : undefined,
 		`- Transcript: ${transcriptPath}`,
 		`- Debate dir: ${debateDir}`,
 		``,
@@ -1015,19 +1192,12 @@ async function runDebate(
 		``,
 		truncation.content,
 		truncation.truncated ? `\n\n[Resolution truncated in tool output; full file at ${finalPath}]` : "",
-	].join("\n");
+	].filter((line): line is string => line !== undefined).join("\n");
 
 	const result: DebateResult = {
 		summary,
-		status,
-		converged,
-		roundsRun,
-		debateDir,
-		transcriptPath,
-		resolutionPath: finalPath,
-		workflowPath,
-		experts: experts.map((e) => e.name),
-		subagentWorkflow,
+		...resultBase,
+		reportPath,
 	};
 	onPanelEvent?.({ type: "final", result });
 	return result;
@@ -1214,7 +1384,7 @@ function renderDashboardLines(state: DashboardState, theme: any, width: number):
 		lines.push(...boxLines("user steering", "? waiting", qLines.map((q) => theme.fg("dim", q)), w, theme, "warning"));
 	}
 	if (state.final) {
-		lines.push(...boxLines("resolution", state.final.status, [theme.fg("dim", state.final.resolutionPath)], w, theme, state.final.converged ? "success" : "warning"));
+		lines.push(...boxLines("resolution", state.final.status, [theme.fg("dim", state.final.reportPath ?? state.final.resolutionPath)], w, theme, state.final.converged ? "success" : "warning"));
 	}
 	return lines.slice(0, 28);
 }
@@ -1267,7 +1437,7 @@ async function listDebateSessions(cwd: string): Promise<Array<{ dir: string; lab
 	return sessions.sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, 30);
 }
 
-function parseDebateCommand(args: string): Pick<DebateInput, "idea" | "rounds" | "intensity" | "research" | "planExperts" | "subagents" | "expertSubagents" | "strongModel" | "plannerModel" | "expertModel" | "juniorModel" | "synthModel"> & { keepDashboard?: boolean } {
+function parseDebateCommand(args: string): Pick<DebateInput, "idea" | "rounds" | "intensity" | "research" | "planExperts" | "subagents" | "expertSubagents" | "prototyping" | "htmlReport" | "workshop" | "strongModel" | "plannerModel" | "expertModel" | "juniorModel" | "synthModel"> & { keepDashboard?: boolean } {
 	const parts = args.match(/(?:[^\s"]+|"[^"]*")+/g) ?? [];
 	let rounds = DEFAULT_ROUNDS;
 	let intensity: Intensity = "ruthless";
@@ -1276,6 +1446,9 @@ function parseDebateCommand(args: string): Pick<DebateInput, "idea" | "rounds" |
 	let keepDashboard = false;
 	let subagents = false;
 	let expertSubagents = false;
+	let prototyping = false;
+	let htmlReport = false;
+	let workshop = false;
 	let strongModel: string | undefined;
 	let plannerModel: string | undefined;
 	let expertModel: string | undefined;
@@ -1320,6 +1493,23 @@ function parseDebateCommand(args: string): Pick<DebateInput, "idea" | "rounds" |
 			expertSubagents = true;
 			continue;
 		}
+		if (raw === "--prototype" || raw === "--prototypes" || raw === "--prototyping") {
+			prototyping = true;
+			continue;
+		}
+		if (raw === "--html-report" || raw === "--report") {
+			htmlReport = true;
+			continue;
+		}
+		if (raw === "--workshop" || raw === "--rlm") {
+			workshop = true;
+			research = true;
+			subagents = true;
+			expertSubagents = true;
+			prototyping = true;
+			htmlReport = true;
+			continue;
+		}
 		const readValue = (prefix: string): string | undefined => {
 			if (raw === prefix && parts[i + 1]) return parts[++i].replace(/^"|"$/g, "");
 			if (raw.startsWith(`${prefix}=`)) return raw.slice(prefix.length + 1);
@@ -1337,12 +1527,108 @@ function parseDebateCommand(args: string): Pick<DebateInput, "idea" | "rounds" |
 		if (synth) { synthModel = synth; continue; }
 		ideaParts.push(raw);
 	}
-	return { idea: ideaParts.join(" ").trim(), rounds, intensity, research, planExperts, subagents, expertSubagents, strongModel, plannerModel, expertModel, juniorModel, synthModel, keepDashboard };
+	return { idea: ideaParts.join(" ").trim(), rounds, intensity, research, planExperts, subagents, expertSubagents, prototyping, htmlReport, workshop, strongModel, plannerModel, expertModel, juniorModel, synthModel, keepDashboard };
 }
 
 export default function technicalDebate(pi: ExtensionAPI) {
 	pi.registerMessageRenderer("technical-debate", (message, _options, _theme) => {
 		return new Markdown(String(message.content ?? ""), 0, 0, getMarkdownTheme());
+	});
+
+	pi.registerTool({
+		name: PROTOTYPE_TOOL,
+		label: "Debate Scratchpad",
+		description:
+			"Create/run small throwaway prototype experiments for a technical_debate expert inside the debate artifact directory. Enforces all files stay under <debateDir>/scratch/<expertName> and records command output for the final report.",
+		promptSnippet: "Run isolated scratch/prototype code experiments for expert-panel debates and save outputs as artifacts.",
+		promptGuidelines: [
+			"Use debate_scratch only when technical_debate/workshop prompts provide a debateDir; keep experiments small, cite artifact paths, and do not use it for project mutations.",
+		],
+		parameters: Type.Object({
+			debateDir: Type.String({ description: "Absolute or cwd-relative .pi/technical-debates/<run> artifact directory" }),
+			expertName: Type.String({ description: "Expert lane/name using this scratchpad" }),
+			label: Type.Optional(Type.String({ description: "Short label for this run, e.g. timing-check or parser-prototype" })),
+			files: Type.Optional(Type.Array(Type.Object({
+				path: Type.String({ description: "Relative path under this expert's scratch directory" }),
+				content: Type.String(),
+			}), { description: "Optional files to create before running the command" })),
+			command: Type.Optional(Type.String({ description: "Optional shell command to run from the expert scratch directory" })),
+			timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 120, default: 20 })),
+		}),
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+			const debateDir = resolveMaybe(ctx.cwd, params.debateDir);
+			if (!debateDir.includes(`${path.sep}.pi${path.sep}technical-debates${path.sep}`)) {
+				throw new Error("debateDir must point inside a .pi/technical-debates run directory");
+			}
+			const scratchRoot = path.join(debateDir, "scratch", safeSegment(params.expertName));
+			await fs.mkdir(scratchRoot, { recursive: true });
+			const writtenFiles: string[] = [];
+			for (const file of params.files ?? []) {
+				if (path.isAbsolute(file.path)) throw new Error(`Scratch file path must be relative: ${file.path}`);
+				const target = path.resolve(scratchRoot, file.path);
+				assertInside(scratchRoot, target);
+				await writeFileQueued(target, file.content);
+				writtenFiles.push(target);
+			}
+			let stdout = "";
+			let stderr = "";
+			let code: number | undefined;
+			let killed: boolean | undefined;
+			if (params.command?.trim()) {
+				const run = await pi.exec("bash", ["-lc", params.command], {
+					cwd: scratchRoot,
+					signal,
+					timeout: (params.timeoutSeconds ?? 20) * 1000,
+				});
+				stdout = run.stdout ?? "";
+				stderr = run.stderr ?? "";
+				code = run.code;
+				killed = run.killed;
+			}
+			const label = safeSegment(params.label ?? params.command?.split("\n")[0] ?? "scratch-run");
+			const artifactPath = path.join(scratchRoot, `${timestampSlug()}-${label}.md`);
+			const outTrunc = truncateHead(stdout, { maxBytes: 20 * 1024, maxLines: 500 });
+			const errTrunc = truncateHead(stderr, { maxBytes: 10 * 1024, maxLines: 300 });
+			const artifact = [
+				`# Scratch run: ${params.label ?? label}`,
+				``,
+				`Expert: ${params.expertName}`,
+				`Directory: ${scratchRoot}`,
+				``,
+				`## Files written`,
+				...(writtenFiles.length ? writtenFiles.map((file) => `- ${file}`) : ["- none"]),
+				``,
+				`## Command`,
+				"```bash",
+				params.command ?? "(none)",
+				"```",
+				`Exit code: ${code ?? "not run"}${killed ? " (killed/timeout)" : ""}`,
+				``,
+				`## stdout`,
+				"```text",
+				outTrunc.content || "(empty)",
+				outTrunc.truncated ? "\n[stdout truncated]" : "",
+				"```",
+				``,
+				`## stderr`,
+				"```text",
+				errTrunc.content || "(empty)",
+				errTrunc.truncated ? "\n[stderr truncated]" : "",
+				"```",
+			].join("\n");
+			await writeFileQueued(artifactPath, artifact);
+			return {
+				content: [{ type: "text", text: `Scratch artifact: ${artifactPath}\nExit code: ${code ?? "not run"}\n\nstdout:\n${outTrunc.content || "(empty)"}\n\nstderr:\n${errTrunc.content || "(empty)"}` }],
+				details: { scratchRoot, artifactPath, writtenFiles, code, killed, stdoutBytes: Buffer.byteLength(stdout), stderrBytes: Buffer.byteLength(stderr) },
+			};
+		},
+		renderCall(args, theme) {
+			return new Text(theme.fg("toolTitle", theme.bold("debate_scratch ")) + theme.fg("accent", args.expertName ?? "expert") + "\n" + theme.fg("dim", args.label ?? args.command ?? "scratch run"), 0, 0);
+		},
+		renderResult(result, _options, theme) {
+			const details = result.details as { artifactPath?: string; code?: number } | undefined;
+			return new Text(`${theme.fg("success", "✓")} ${theme.fg("toolTitle", "scratch")}: ${theme.fg("accent", String(details?.code ?? "not run"))}\n${theme.fg("dim", details?.artifactPath ?? "")}`, 0, 0);
+		},
 	});
 
 	pi.registerTool({
@@ -1354,6 +1640,7 @@ export default function technicalDebate(pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Use technical_debate when the user asks to debate, ideate, stress-test, grill, or resolve a technical idea with multiple expert viewpoints.",
 			"technical_debate can improve an idea, conclude it needs iteration, reject it, or declare it too poorly posed to proceed.",
+			"Set technical_debate workshop=true when the user wants RLM-style recursive delegation, expert subagent calls, executable scratch prototypes, background research, and an HTML report of evidence.",
 		],
 		parameters: DebateParams,
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
@@ -1390,7 +1677,7 @@ export default function technicalDebate(pi: ExtensionAPI) {
 			return new Text(
 				`${icon} ${theme.fg("toolTitle", theme.bold("expert panel"))} ${theme.fg("accent", details.status)}\n` +
 					`${theme.fg("muted", `${details.roundsRun} rounds • ${details.experts.join(", ")}`)}\n` +
-					`${theme.fg("dim", details.resolutionPath)}`,
+					`${theme.fg("dim", details.reportPath ?? details.resolutionPath)}`,
 				0,
 				0,
 			);
@@ -1407,7 +1694,7 @@ export default function technicalDebate(pi: ExtensionAPI) {
 			}
 			const edited = await ctx.ui.editor(
 				"Technical idea for expert panel",
-				"Paste proposal / PRD excerpt / architecture here...\n\nFlags: --rounds 4 --intensity ruthless --research --subagents --expert-subagents --fixed-experts", 
+				"Paste proposal / PRD excerpt / architecture here...\n\nFlags: --workshop --rounds 4 --intensity ruthless --research --subagents --expert-subagents --prototype --html-report --fixed-experts",
 			);
 			idea = edited?.trim() ?? "";
 		}
@@ -1451,13 +1738,13 @@ export default function technicalDebate(pi: ExtensionAPI) {
 
 	pi.registerCommand("debate", {
 		description:
-			"Run an adversarial expert panel. Usage: /debate [--rounds 4] [--intensity ruthless] [--research] [--subagents] [--expert-subagents] [--fixed-experts] <idea>",
+			"Run an adversarial expert panel. Usage: /debate [--workshop] [--rounds 4] [--intensity ruthless] [--research] [--subagents] [--expert-subagents] [--prototype] [--html-report] [--fixed-experts] <idea>",
 		handler: async (args, ctx) => runIdeationCommand(args, ctx, "debate"),
 	});
 
 	pi.registerCommand("ideate", {
 		description:
-			"Run a world-class expert ideation panel. Usage: /ideate [--rounds 4] [--intensity ruthless] [--research] [--subagents] [--expert-subagents] [--fixed-experts] <idea>",
+			"Run a world-class expert ideation panel. Usage: /ideate [--workshop] [--rounds 4] [--intensity ruthless] [--research] [--subagents] [--expert-subagents] [--prototype] [--html-report] [--fixed-experts] <idea>",
 		handler: async (args, ctx) => runIdeationCommand(args, ctx, "ideate"),
 	});
 
