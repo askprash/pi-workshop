@@ -37,7 +37,7 @@ const ExpertSchema = Type.Object({
 	assistantBriefs: Type.Optional(Type.Array(AssistantBriefSchema, { description: "Tailored junior assistant brief tasks for this expert" })),
 });
 
-const DebateParams = Type.Object({
+const WorkshopParams = Type.Object({
 	idea: Type.String({ description: "Technical idea, proposal, PRD excerpt, architecture, or question to workshop" }),
 	rounds: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_ROUNDS, default: DEFAULT_ROUNDS })),
 	profile: Type.Optional(Type.String({ description: "Named config profile to apply, e.g. workshop or safe. --workshop is shorthand for profile=workshop." })),
@@ -98,11 +98,11 @@ const DebateParams = Type.Object({
 });
 
 type ExpertInput = Static<typeof ExpertSchema>;
-type DebateInput = Static<typeof DebateParams>;
+type WorkshopInput = Static<typeof WorkshopParams>;
 
-type DebateConfig = {
-	defaults?: Partial<Omit<DebateInput, "idea" | "experts" | "contextPaths" | "outputDir" | "cwd">> & { keepDashboard?: boolean };
-	profiles?: Record<string, Partial<Omit<DebateInput, "idea" | "experts" | "contextPaths" | "outputDir" | "cwd">> & { keepDashboard?: boolean }>;
+type WorkshopConfig = {
+	defaults?: Partial<Omit<WorkshopInput, "idea" | "experts" | "contextPaths" | "outputDir" | "cwd">> & { keepDashboard?: boolean };
+	profiles?: Record<string, Partial<Omit<WorkshopInput, "idea" | "experts" | "contextPaths" | "outputDir" | "cwd">> & { keepDashboard?: boolean }>;
 	models?: {
 		strongModel?: string;
 		plannerModel?: string;
@@ -117,14 +117,14 @@ type DebateConfig = {
 	};
 };
 
-type ResolvedDebateConfig = {
-	params: DebateInput & { keepDashboard?: boolean };
-	limits: Required<NonNullable<DebateConfig["limits"]>>;
+type ResolvedWorkshopConfig = {
+	params: WorkshopInput & { keepDashboard?: boolean };
+	limits: Required<NonNullable<WorkshopConfig["limits"]>>;
 	configPaths: string[];
 	profile?: string;
 };
 
-const BUILTIN_CONFIG: Required<Pick<DebateConfig, "defaults" | "profiles" | "models" | "limits">> = {
+const BUILTIN_CONFIG: Required<Pick<WorkshopConfig, "defaults" | "profiles" | "models" | "limits">> = {
 	defaults: {
 		rounds: DEFAULT_ROUNDS,
 		research: false,
@@ -169,7 +169,7 @@ type ChildRun = {
 	usage: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; turns: number };
 };
 
-type DebateResult = {
+type WorkshopResult = {
 	summary: string;
 	status: ResolutionStatus;
 	converged: boolean;
@@ -196,7 +196,7 @@ type PanelEvent =
 	| { type: "synth_start"; round: number }
 	| { type: "synth_done"; round: number; path: string; text: string; status: ResolutionStatus; converged: boolean }
 	| { type: "questions"; round: number; questions: string[] }
-	| { type: "final"; result: DebateResult };
+	| { type: "final"; result: WorkshopResult };
 
 const DEFAULT_EXPERTS: ExpertInput[] = [
 	{
@@ -252,8 +252,8 @@ function providerQualifiedIfAvailable(ctx: any, provider: string | undefined, mo
 	}
 }
 
-function mergeConfig(a: DebateConfig, b: DebateConfig): DebateConfig {
-	const profiles: NonNullable<DebateConfig["profiles"]> = { ...(a.profiles ?? {}) };
+function mergeConfig(a: WorkshopConfig, b: WorkshopConfig): WorkshopConfig {
+	const profiles: NonNullable<WorkshopConfig["profiles"]> = { ...(a.profiles ?? {}) };
 	for (const [name, profile] of Object.entries(b.profiles ?? {})) {
 		profiles[name] = { ...(profiles[name] ?? {}), ...profile };
 	}
@@ -269,10 +269,10 @@ function definedOnly<T extends Record<string, any>>(obj: T): Partial<T> {
 	return Object.fromEntries(Object.entries(obj).filter(([, value]) => value !== undefined)) as Partial<T>;
 }
 
-async function readConfigFile(filePath: string): Promise<DebateConfig | undefined> {
+async function readConfigFile(filePath: string): Promise<WorkshopConfig | undefined> {
 	try {
 		const text = await fs.readFile(filePath, "utf8");
-		const parsed = JSON.parse(text) as DebateConfig;
+		const parsed = JSON.parse(text) as WorkshopConfig;
 		return parsed && typeof parsed === "object" ? parsed : undefined;
 	} catch (error) {
 		if ((error as any)?.code === "ENOENT") return undefined;
@@ -291,8 +291,8 @@ async function findProjectConfig(cwd: string): Promise<string | undefined> {
 	}
 }
 
-async function resolveDebateConfig(cwd: string, params: DebateInput & { keepDashboard?: boolean }): Promise<ResolvedDebateConfig> {
-	let config: DebateConfig = BUILTIN_CONFIG;
+async function resolveWorkshopConfig(cwd: string, params: WorkshopInput & { keepDashboard?: boolean }): Promise<ResolvedWorkshopConfig> {
+	let config: WorkshopConfig = BUILTIN_CONFIG;
 	const configPaths: string[] = [];
 	const globalPath = path.join(os.homedir(), ".pi", "agent", "pi-workshop.config.json");
 	const globalConfig = await readConfigFile(globalPath);
@@ -322,7 +322,7 @@ async function resolveDebateConfig(cwd: string, params: DebateInput & { keepDash
 	const maxScratchTimeoutSeconds = Math.max(1, Number(config.limits?.maxScratchTimeoutSeconds ?? DEFAULT_MAX_SCRATCH_TIMEOUT_SECONDS));
 	const scratchTimeoutSeconds = Math.max(1, Math.min(maxScratchTimeoutSeconds, Number(config.limits?.scratchTimeoutSeconds ?? DEFAULT_SCRATCH_TIMEOUT_SECONDS)));
 	return {
-		params: { ...mergedParams, rounds } as DebateInput & { keepDashboard?: boolean },
+		params: { ...mergedParams, rounds } as WorkshopInput & { keepDashboard?: boolean },
 		limits: {
 			maxRounds,
 			scratchTimeoutSeconds,
@@ -943,7 +943,7 @@ async function generateHtmlReport(args: {
 	finalPath: string;
 	transcriptPath: string;
 	roundFiles: string[];
-	result: Omit<DebateResult, "summary" | "reportPath">;
+	result: Omit<WorkshopResult, "summary" | "reportPath">;
 }): Promise<string> {
 	const reportPath = path.join(args.workshopDir, "report.html");
 	const scratchRoot = path.join(args.workshopDir, "scratch");
@@ -1019,17 +1019,17 @@ async function askUserForQuestions(ctx: any, round: number, questions: string[],
 	return true;
 }
 
-async function runDebate(
+async function runWorkshop(
 	pi: ExtensionAPI,
-	params: DebateInput,
+	params: WorkshopInput,
 	ctx: any,
 	signal?: AbortSignal,
 	onUpdate?: (text: string) => void,
 	onArtifact?: (artifact: { kind: "critique" | "synthesis"; round: number; name: string; path: string; text: string }) => void,
 	onPanelEvent?: (event: PanelEvent) => void,
-): Promise<DebateResult> {
+): Promise<WorkshopResult> {
 	const baseCwd = resolveMaybe(ctx.cwd, params.cwd ?? ".");
-	const resolvedConfig = await resolveDebateConfig(baseCwd, params);
+	const resolvedConfig = await resolveWorkshopConfig(baseCwd, params);
 	params = resolvedConfig.params;
 	const rounds = params.rounds ?? DEFAULT_ROUNDS;
 	const intensity: Intensity = "hard";
@@ -1342,7 +1342,7 @@ async function runDebate(
 		truncation.truncated ? `\n\n[Resolution truncated in tool output; full file at ${finalPath}]` : "",
 	].filter((line): line is string => line !== undefined).join("\n");
 
-	const result: DebateResult = {
+	const result: WorkshopResult = {
 		summary,
 		...resultBase,
 		reportPath,
@@ -1360,7 +1360,7 @@ type DashboardState = {
 	synthesis?: { status?: ResolutionStatus; converged?: boolean; activity: string[]; path?: string };
 	questions: string[];
 	delegation: string[];
-	final?: DebateResult;
+	final?: WorkshopResult;
 };
 
 function createDashboardState(): DashboardState {
@@ -1548,7 +1548,7 @@ function installDashboardWidget(ctx: any, state: DashboardState): void {
 	);
 }
 
-async function listDebateSessions(cwd: string): Promise<Array<{ dir: string; label: string; mtimeMs: number; status?: string }>> {
+async function listWorkshopSessions(cwd: string): Promise<Array<{ dir: string; label: string; mtimeMs: number; status?: string }>> {
 	const roots: string[] = [];
 	let probe = cwd;
 	while (true) {
@@ -1585,7 +1585,7 @@ async function listDebateSessions(cwd: string): Promise<Array<{ dir: string; lab
 	return sessions.sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, 30);
 }
 
-function parseDebateCommand(args: string): Pick<DebateInput, "idea" | "rounds" | "profile" | "research" | "planExperts" | "subagents" | "expertSubagents" | "prototyping" | "htmlReport" | "workshop" | "strongModel" | "plannerModel" | "expertModel" | "juniorModel" | "synthModel"> & { keepDashboard?: boolean } {
+function parseWorkshopCommand(args: string): Pick<WorkshopInput, "idea" | "rounds" | "profile" | "research" | "planExperts" | "subagents" | "expertSubagents" | "prototyping" | "htmlReport" | "workshop" | "strongModel" | "plannerModel" | "expertModel" | "juniorModel" | "synthModel"> & { keepDashboard?: boolean } {
 	const parts = args.match(/(?:[^\s"]+|"[^"]*")+/g) ?? [];
 	let rounds: number | undefined;
 	let profile: string | undefined;
@@ -1677,14 +1677,14 @@ function parseDebateCommand(args: string): Pick<DebateInput, "idea" | "rounds" |
 	return { idea: ideaParts.join(" ").trim(), rounds, profile, research, planExperts, subagents, expertSubagents, prototyping, htmlReport, workshop, strongModel, plannerModel, expertModel, juniorModel, synthModel, keepDashboard };
 }
 
-export default function technicalDebate(pi: ExtensionAPI) {
+export default function piWorkshop(pi: ExtensionAPI) {
 	pi.registerMessageRenderer("pi-workshop", (message, _options, _theme) => {
 		return new Markdown(String(message.content ?? ""), 0, 0, getMarkdownTheme());
 	});
 
 	pi.registerTool({
 		name: PROTOTYPE_TOOL,
-		label: "Debate Scratchpad",
+		label: "Workshop Scratchpad",
 		description:
 			"Create/run small throwaway prototype experiments for a workshop expert inside the workshop artifact directory. Enforces all files stay under <workshopDir>/scratch/<expertName> and records command output for the final report.",
 		promptSnippet: "Run isolated scratch/prototype code experiments for pi-workshop and save outputs as artifacts.",
@@ -1703,7 +1703,7 @@ export default function technicalDebate(pi: ExtensionAPI) {
 			timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, description: "Requested timeout for this scratch command. Defaults to config limits.scratchTimeoutSeconds; requests above limits.maxScratchTimeoutSeconds require approval/escalation." })),
 		}),
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-			const scratchConfig = await resolveDebateConfig(ctx.cwd, { idea: "scratch" });
+			const scratchConfig = await resolveWorkshopConfig(ctx.cwd, { idea: "scratch" });
 			let timeoutSeconds = params.timeoutSeconds ?? scratchConfig.limits.scratchTimeoutSeconds;
 			if (timeoutSeconds > scratchConfig.limits.maxScratchTimeoutSeconds) {
 				const message = `Scratch command requested ${timeoutSeconds}s, above configured max ${scratchConfig.limits.maxScratchTimeoutSeconds}s.`;
@@ -1800,9 +1800,9 @@ export default function technicalDebate(pi: ExtensionAPI) {
 			"workshop can improve an idea, conclude it needs iteration, reject it, or declare it too poorly posed to proceed.",
 			"Set workshop=true or profile='workshop' when the user wants RLM-style recursive delegation, expert subagent calls, executable scratch prototypes, background research, and an HTML report of evidence.",
 		],
-		parameters: DebateParams,
+		parameters: WorkshopParams,
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
-			const result = await runDebate(
+			const result = await runWorkshop(
 				pi,
 				params,
 				ctx,
@@ -1826,7 +1826,7 @@ export default function technicalDebate(pi: ExtensionAPI) {
 			);
 		},
 		renderResult(result, _options, theme) {
-			const details = result.details as DebateResult | undefined;
+			const details = result.details as WorkshopResult | undefined;
 			if (!details) {
 				const text = result.content[0];
 				return new Text(text?.type === "text" ? text.text : "", 0, 0);
@@ -1843,7 +1843,7 @@ export default function technicalDebate(pi: ExtensionAPI) {
 	});
 
 	const runWorkshopCommand = async (args: string, ctx: any) => {
-		const parsed = parseDebateCommand(args);
+		const parsed = parseWorkshopCommand(args);
 		let idea = parsed.idea;
 		if (!idea) {
 			if (!ctx.hasUI) {
@@ -1864,7 +1864,7 @@ export default function technicalDebate(pi: ExtensionAPI) {
 		if (ctx.hasUI) installDashboardWidget(ctx, dashboard);
 		ctx.ui.setStatus("pi-workshop", "workshop starting...");
 		try {
-			const result = await runDebate(
+			const result = await runWorkshop(
 				pi,
 				{ ...parsed, idea, interactive: true },
 				ctx,
@@ -1894,8 +1894,8 @@ export default function technicalDebate(pi: ExtensionAPI) {
 	pi.registerCommand("workshop-config", {
 		description: "Show resolved pi-workshop config. Usage: /workshop-config [--profile workshop]",
 		handler: async (args, ctx) => {
-			const parsed = parseDebateCommand(args);
-			const resolved = await resolveDebateConfig(ctx.cwd, { ...parsed, idea: "config preview" });
+			const parsed = parseWorkshopCommand(args);
+			const resolved = await resolveWorkshopConfig(ctx.cwd, { ...parsed, idea: "config preview" });
 			const content = [
 				"# Pi workshop config",
 				"",
@@ -1937,7 +1937,7 @@ export default function technicalDebate(pi: ExtensionAPI) {
 	pi.registerCommand("workshop-sessions", {
 		description: "Pick a previous workshop session and show its saved resolution",
 		handler: async (_args, ctx) => {
-			const sessions = await listDebateSessions(ctx.cwd);
+			const sessions = await listWorkshopSessions(ctx.cwd);
 			if (sessions.length === 0) {
 				ctx.ui.notify("No previous .pi/workshops sessions found", "warning");
 				return;
@@ -1962,7 +1962,7 @@ export default function technicalDebate(pi: ExtensionAPI) {
 		description:
 			"Continue from a previous workshop session. Usage: /workshop-pickup [--rounds 2] [--research] [optional session-dir or instructions]",
 		handler: async (args, ctx) => {
-			const parsed = parseDebateCommand(args);
+			const parsed = parseWorkshopCommand(args);
 			let targetDir: string | undefined;
 			let extraInstructions = parsed.idea;
 			if (parsed.idea) {
@@ -1973,7 +1973,7 @@ export default function technicalDebate(pi: ExtensionAPI) {
 				}
 			}
 			if (!targetDir) {
-				const sessions = await listDebateSessions(ctx.cwd);
+				const sessions = await listWorkshopSessions(ctx.cwd);
 				if (sessions.length === 0) {
 					ctx.ui.notify("No previous .pi/workshops sessions found", "warning");
 					return;
@@ -2002,7 +2002,7 @@ export default function technicalDebate(pi: ExtensionAPI) {
 			if (ctx.hasUI) installDashboardWidget(ctx, dashboard);
 			ctx.ui.setStatus("pi-workshop", "picking up previous session...");
 			try {
-				const result = await runDebate(
+				const result = await runWorkshop(
 					pi,
 					{
 						...parsed,
