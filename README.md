@@ -1,33 +1,32 @@
-# technical-debate / expert-panel pi extension
+# pi-workshop / workshop pi extension
 
-Global pi extension for intense technical ideation with world-class expert panels.
+Global pi extension for intense technical ideation with world-class workshops.
 
 ## What it does
 
 Registers:
 
-- `/debate [--workshop|--profile workshop] [--rounds 4] [--research] [--subagents] [--expert-subagents] [--prototype] [--html-report] [--fixed-experts] [--keep-dashboard] [--strong-model gpt-5.5] [--junior-model gpt-5.4-mini] <idea>`
-- `/ideate [--workshop|--profile workshop] [--rounds 4] [--research] [--subagents] [--expert-subagents] [--prototype] [--html-report] [--fixed-experts] [--keep-dashboard] [--strong-model gpt-5.5] [--junior-model gpt-5.4-mini] <idea>`
-- `/ideate-config [--profile workshop]` — show resolved defaults/config/limits
-- `/ideate-hide` — hide the observatory widget
-- `/ideate-sessions` — pick a previous session and show its saved resolution
-- `/ideate-pickup [--rounds 2] [--research] [session-dir or instructions]` — continue from a previous session
-- `technical_debate` tool for the assistant
-- `debate_scratch` tool for expert-only scratch/prototype experiments inside a debate artifact directory
+- `/workshop [--profile workshop] [--rounds 4] [--research] [--subagents] [--expert-subagents] [--prototype] [--html-report] [--fixed-experts] [--keep-dashboard] [--strong-model gpt-5.5] [--junior-model gpt-5.4-mini] <idea>`
+- `/workshop-config [--profile workshop]` — show resolved defaults/config/limits
+- `/workshop-hide` — hide the observatory widget
+- `/workshop-sessions` — pick a previous session and show its saved resolution
+- `/workshop-pickup [--rounds 2] [--research] [session-dir or instructions]` — continue from a previous session
+- `workshop` tool for the assistant
+- `workshop_scratch` tool for expert-only scratch/prototype experiments inside a workshop artifact directory
 
 The extension first runs a strong-model panel-designer/meta-planner pass (unless `--fixed-experts` or explicit tool experts are provided), chooses 2-4 appropriate experts **and their tailored junior research/scouting briefs**, spawns independent `pi --mode json --no-session` expert processes, then a synthesizer, for multiple rounds. It converges on one of:
 
 - `ACCEPT` — idea is ready enough to proceed
 - `ITERATE` — promising, but must be revised first
 - `REJECT` — core premise/cost/risk fails
-- `ILL_POSED` — cannot be debated productively until reframed
+- `ILL_POSED` — cannot be evaluated productively until reframed
 - `UNRESOLVED` — round cap hit or experts still disagree
 
 A negative conclusion is valid convergence. The panel is instructed to find the strongest viable version of the idea, not just criticize it.
 
 ## TUI behavior
 
-The slash commands show an **expert panel observatory** widget above the editor while the run is active. It now auto-hides when the run completes unless `--keep-dashboard` is provided:
+The slash command shows a **workshop observatory** widget above the editor while the run is active. It now auto-hides when the run completes unless `--keep-dashboard` is provided:
 
 - proper side-by-side bordered panels for expert lanes (`queued`, `running`, `done`)
 - round/phase flow (`plan → briefs → experts → synthesis → questions → final`)
@@ -47,10 +46,10 @@ The footer/status line still shows the current phase, but it is no longer the on
 Manual controls:
 
 ```text
-/ideate-hide
-/ideate-sessions
-/ideate-pickup --rounds 2
-/ideate-pickup /path/to/.pi/technical-debates/<session-dir> --rounds 2
+/workshop-hide
+/workshop-sessions
+/workshop-pickup --rounds 2
+/workshop-pickup /path/to/.pi/workshops/<session-dir> --rounds 2
 ```
 
 ## Expert selection
@@ -77,8 +76,7 @@ These are deliberately read-only. Experts can inspect the codebase and cite file
 Research mode:
 
 ```text
-/ideate --research <idea>
-/debate --research <idea>
+/workshop --research <idea>
 ```
 
 `--research` grants default experts:
@@ -92,8 +90,8 @@ This lets them use controlled commands for local inspection plus installed web/d
 Subagent briefing mode:
 
 ```text
-/ideate --subagents <idea>
-/ideate --subagents --research <idea>
+/workshop --subagents <idea>
+/workshop --subagents --research <idea>
 ```
 
 `--subagents` means **parent-orchestrated junior briefs**, not recursive expert delegation. The extension keeps orchestration in the parent for observability and safety. Experts do **not** recursively launch arbitrary subagents themselves in the default slash workflow. Instead, the strong-model meta-planner decides tailored junior brief tasks for each expert, and before each expert critique the parent runs those controlled pi-subagents briefs:
@@ -101,28 +99,28 @@ Subagent briefing mode:
 - `scout` for local/code/context implications for that expert's lane
 - `researcher` for external web/docs/papers/prior-art evidence when `--research` is set
 
-The resulting `round_N_<expert>_assistant_brief.md` files are written into the debate directory and passed to the expert as junior-assistant input. The expert is instructed to read them, correct weak claims, and remain responsible for final judgment.
+The resulting `round_N_<expert>_assistant_brief.md` files are written into the workshop directory and passed to the expert as junior-assistant input. The expert is instructed to read them, correct weak claims, and remain responsible for final judgment.
 
 Direct main-expert subagent calls are disabled by default and are made explicit in the dashboard plus `workflow.md`. To allow them, use:
 
 ```text
-/ideate --expert-subagents <idea>
+/workshop --expert-subagents <idea>
 ```
 
-or pass explicit tool experts through `technical_debate` with `expert.tools` containing `subagent`. When enabled, the `subagent` tool is added to main expert tool lists; observed JSON tool events appear in the expert lane as `MAIN EXPERT called subagent tool`. This is intentionally separate from `--subagents` so you can distinguish parent-run brief generation from expert-initiated delegation.
+or pass explicit tool experts through `workshop` with `expert.tools` containing `subagent`. When enabled, the `subagent` tool is added to main expert tool lists; observed JSON tool events appear in the expert lane as `MAIN EXPERT called subagent tool`. This is intentionally separate from `--subagents` so you can distinguish parent-run brief generation from expert-initiated delegation.
 
 Workshop / RLM-style mode:
 
 ```text
-/ideate --workshop <idea>
+/workshop --profile workshop <idea>
 ```
 
-`--workshop` is shorthand for the configurable `workshop` profile. The built-in profile enables:
+`--profile workshop` selects the configurable `workshop` profile. The `--workshop` flag is also accepted as shorthand. The built-in profile enables:
 
 - `--research`
 - `--subagents` parent-orchestrated briefs
 - `--expert-subagents` direct main-expert access to `subagent`
-- `--prototype` / `debate_scratch`
+- `--prototype` / `workshop_scratch`
 - `--html-report`
 
 You can change what workshop means in config. This is inspired by the RLM pattern: keep the root process as orchestrator, let experts offload bounded subtasks to separate context windows, and preserve a trajectory of child calls / scratch runs as inspectable artifacts rather than stuffing everything into one context.
@@ -140,10 +138,10 @@ This requires `pi-subagents` to be installed. Your environment has it installed.
 Config precedence:
 
 ```text
-built-in defaults → ~/.pi/agent/technical-debate.config.json → nearest project .pi/technical-debate.config.json → slash flags / tool params
+built-in defaults → ~/.pi/agent/pi-workshop.config.json → nearest project .pi/pi-workshop.config.json → slash flags / tool params
 ```
 
-See `technical-debate.config.example.json` in this extension directory. Minimal example:
+See `pi-workshop.config.example.json` in this extension directory. Minimal example:
 
 ```json
 {
@@ -171,56 +169,50 @@ See `technical-debate.config.example.json` in this extension directory. Minimal 
 }
 ```
 
-Use `/ideate-config` to show the resolved config and which files were loaded.
+Use `/workshop-config` to show the resolved config and which files were loaded.
 
-`scratchTimeoutSeconds` is the default timeout for each `debate_scratch` command. Experts may request longer per command with `timeoutSeconds`; requests above `maxScratchTimeoutSeconds` require approval in interactive mode, and fail/escalate when running in non-interactive child expert processes.
+`scratchTimeoutSeconds` is the default timeout for each `workshop_scratch` command. Experts may request longer per command with `timeoutSeconds`; requests above `maxScratchTimeoutSeconds` require approval in interactive mode, and fail/escalate when running in non-interactive child expert processes.
 
 ## Usage
 
 ```text
-/ideate --rounds 4 --research --subagents My idea is ...
+/workshop --rounds 4 --research --subagents My idea is ...
 ```
 
 Allow direct subagent calls from main experts as well as parent-run briefs:
 
 ```text
-/ideate --research --subagents --expert-subagents My idea is ...
+/workshop --research --subagents --expert-subagents My idea is ...
 ```
 
 Full workshop mode with research, recursive expert delegation, scratch prototypes, and HTML report:
 
 ```text
-/ideate --workshop --rounds 4 My idea is ...
+/workshop --profile workshop --rounds 4 My idea is ...
 ```
 
 Explicit model routing:
 
 ```text
-/ideate --research --subagents --strong-model gpt-5.5 --junior-model gpt-5.4-mini My idea is ...
+/workshop --research --subagents --strong-model gpt-5.5 --junior-model gpt-5.4-mini My idea is ...
 ```
 
 Keep the observatory after completion:
 
 ```text
-/ideate --keep-dashboard --rounds 4 My idea is ...
+/workshop --keep-dashboard --rounds 4 My idea is ...
 ```
 
 Skip panel planning and use the fixed fallback pair:
 
 ```text
-/ideate --fixed-experts --rounds 4 My idea is ...
-```
-
-or:
-
-```text
-/debate --rounds 4 My idea is ...
+/workshop --fixed-experts --rounds 4 My idea is ...
 ```
 
 Or ask pi naturally:
 
 ```text
-Use technical_debate to stress-test this architecture: ...
+Use workshop to stress-test this architecture: ...
 ```
 
 ## Artifacts
@@ -228,7 +220,7 @@ Use technical_debate to stress-test this architecture: ...
 By default artifacts are written to:
 
 ```text
-.pi/technical-debates/<timestamp-slug>/
+.pi/workshops/<timestamp-slug>/
 ```
 
 Key files:
@@ -238,7 +230,7 @@ Key files:
 - `round_N_synthesis.md` — per-round synthesis
 - `working-resolution.md` — latest synthesis
 - `workflow.md` — config/subagent/delegation/prototyping/report policy for this run and each expert's tool list
-- `scratch/<expert>/...` — prototype code, commands, stdout/stderr captured by `debate_scratch`
+- `scratch/<expert>/...` — prototype code, commands, stdout/stderr captured by `workshop_scratch`
 - `resolution.md` — final resolution
 - `report.html` — self-contained evaluation report when `--html-report` or `--workshop` is enabled
 - `transcript.md` — full transcript

@@ -15,7 +15,7 @@ const DEFAULT_SCRATCH_TIMEOUT_SECONDS = 60;
 const DEFAULT_MAX_SCRATCH_TIMEOUT_SECONDS = 300;
 const DEFAULT_TOOLS = "read,grep,find,ls";
 const RESEARCH_TOOLS = "read,grep,find,ls,bash,web_search,fetch_content,get_search_content,code_search";
-const PROTOTYPE_TOOL = "debate_scratch";
+const PROTOTYPE_TOOL = "workshop_scratch";
 const OUTPUT_CAP_BYTES = 80 * 1024;
 const DEFAULT_STRONG_MODEL = "gpt-5.5";
 const DEFAULT_JUNIOR_MODEL = "gpt-5.4-mini";
@@ -38,7 +38,7 @@ const ExpertSchema = Type.Object({
 });
 
 const DebateParams = Type.Object({
-	idea: Type.String({ description: "Technical idea, proposal, PRD excerpt, architecture, or question to debate" }),
+	idea: Type.String({ description: "Technical idea, proposal, PRD excerpt, architecture, or question to workshop" }),
 	rounds: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_ROUNDS, default: DEFAULT_ROUNDS })),
 	profile: Type.Optional(Type.String({ description: "Named config profile to apply, e.g. workshop or safe. --workshop is shorthand for profile=workshop." })),
 	experts: Type.Optional(Type.Array(ExpertSchema, { minItems: 2, maxItems: 4 })),
@@ -46,7 +46,7 @@ const DebateParams = Type.Object({
 		Type.Array(Type.String(), { description: "Files/directories experts should inspect before making codebase claims" }),
 	),
 	interactive: Type.Optional(Type.Boolean({ description: "Ask the user to answer blocking open questions between rounds" })),
-	outputDir: Type.Optional(Type.String({ description: "Directory for debate artifacts. Default: .pi/technical-debates/<timestamp-slug>" })),
+	outputDir: Type.Optional(Type.String({ description: "Directory for workshop artifacts. Default: .pi/workshops/<timestamp-slug>" })),
 	cwd: Type.Optional(Type.String({ description: "Working directory for child pi expert processes. Default: current pi cwd" })),
 	strongModel: Type.Optional(Type.String({ description: `Model for meta-planner, main experts, and synthesizer when role-specific model is omitted. Default: current active parent model, else ${DEFAULT_STRONG_MODEL}` })),
 	plannerModel: Type.Optional(Type.String({ description: "Optional pi model id for the panel-designer/meta-planner" })),
@@ -80,7 +80,7 @@ const DebateParams = Type.Object({
 	prototyping: Type.Optional(
 		Type.Boolean({
 			description:
-				"Give experts a debate_scratch tool for isolated throwaway code/timing experiments under the debate artifact directory. Default false.",
+				"Give experts a workshop_scratch tool for isolated throwaway code/timing experiments under the workshop artifact directory. Default false.",
 		}),
 	),
 	htmlReport: Type.Optional(
@@ -92,7 +92,7 @@ const DebateParams = Type.Object({
 	workshop: Type.Optional(
 		Type.Boolean({
 			description:
-				"Convenience shorthand for profile=workshop. The actual behavior is configurable in technical-debate.config.json.",
+				"Convenience shorthand for profile=workshop. The actual behavior is configurable in pi-workshop.config.json.",
 		}),
 	),
 });
@@ -174,7 +174,7 @@ type DebateResult = {
 	status: ResolutionStatus;
 	converged: boolean;
 	roundsRun: number;
-	debateDir: string;
+	workshopDir: string;
 	transcriptPath: string;
 	resolutionPath: string;
 	workflowPath: string;
@@ -276,14 +276,14 @@ async function readConfigFile(filePath: string): Promise<DebateConfig | undefine
 		return parsed && typeof parsed === "object" ? parsed : undefined;
 	} catch (error) {
 		if ((error as any)?.code === "ENOENT") return undefined;
-		throw new Error(`Failed to read technical debate config ${filePath}: ${String((error as Error)?.message ?? error)}`);
+		throw new Error(`Failed to read pi-workshop config ${filePath}: ${String((error as Error)?.message ?? error)}`);
 	}
 }
 
 async function findProjectConfig(cwd: string): Promise<string | undefined> {
 	let probe = cwd;
 	while (true) {
-		const candidate = path.join(probe, ".pi", "technical-debate.config.json");
+		const candidate = path.join(probe, ".pi", "pi-workshop.config.json");
 		if (fssync.existsSync(candidate)) return candidate;
 		const parent = path.dirname(probe);
 		if (parent === probe || probe === os.homedir()) return undefined;
@@ -294,7 +294,7 @@ async function findProjectConfig(cwd: string): Promise<string | undefined> {
 async function resolveDebateConfig(cwd: string, params: DebateInput & { keepDashboard?: boolean }): Promise<ResolvedDebateConfig> {
 	let config: DebateConfig = BUILTIN_CONFIG;
 	const configPaths: string[] = [];
-	const globalPath = path.join(os.homedir(), ".pi", "agent", "technical-debate.config.json");
+	const globalPath = path.join(os.homedir(), ".pi", "agent", "pi-workshop.config.json");
 	const globalConfig = await readConfigFile(globalPath);
 	if (globalConfig) {
 		config = mergeConfig(config, globalConfig);
@@ -581,10 +581,10 @@ function intensityRules(intensity: Intensity): string {
 	].join("\n");
 }
 
-function expertSystemPrompt(expert: ExpertInput, intensity: Intensity, tools: string, parentBriefsEnabled: boolean, prototypingEnabled: boolean, debateDir?: string): string {
+function expertSystemPrompt(expert: ExpertInput, intensity: Intensity, tools: string, parentBriefsEnabled: boolean, prototypingEnabled: boolean, workshopDir?: string): string {
 	const canCallSubagents = toolListIncludes(tools, "subagent");
 	const canPrototype = prototypingEnabled && toolListIncludes(tools, PROTOTYPE_TOOL);
-	return `# Expert Ideation Panelist: ${expert.name}
+	return `# Pi Workshopist: ${expert.name}
 
 ${expert.stance}
 
@@ -597,7 +597,7 @@ Available tools for this run: ${tools}
 Subagent / delegation policy:
 - Parent-orchestrated assistant briefs: ${parentBriefsEnabled ? "ENABLED. Any assistant-brief files were run by the parent orchestrator before you speak; they are junior input, not your own tool calls." : "DISABLED. No parent-run assistant briefs are expected."}
 - Main-expert direct subagent calls: ${canCallSubagents ? "ENABLED because the subagent tool is in your available tools. Use it only for narrow research/verification; report when you used it and remain responsible for judgment." : "DISABLED. You cannot launch subagents in this run. Do not claim you used them."}
-- Scratch/prototype experiments: ${canPrototype ? `ENABLED via ${PROTOTYPE_TOOL}. Use it for throwaway code, timing checks, small simulations, parsing experiments, or executable sanity checks. Debate dir: ${debateDir ?? "(not supplied)"}` : "DISABLED. Do not claim you ran code experiments unless you actually used a tool."}
+- Scratch/prototype experiments: ${canPrototype ? `ENABLED via ${PROTOTYPE_TOOL}. Use it for throwaway code, timing checks, small simulations, parsing experiments, or executable sanity checks. Workshop dir: ${workshopDir ?? "(not supplied)"}` : "DISABLED. Do not claim you ran code experiments unless you actually used a tool."}
 
 Tool policy:
 - Default tools are read/search only: read, grep, find, ls.
@@ -605,7 +605,7 @@ Tool policy:
 - If a web/search tool is installed and explicitly included in available tools, you may use it.
 - If subagent is explicitly included in available tools, you may delegate only narrow research/verification tasks; you remain responsible for final judgment.
 - If subagent is not in available tools, do not pretend you used it.
-- If debate_scratch is included, keep generated code/data small and disposable. Cite the scratch artifact paths and important command output in your critique.
+- If workshop_scratch is included, keep generated code/data small and disposable. Cite the scratch artifact paths and important command output in your critique.
 
 Rules:
 - Stay in your authority lane, but name cross-lane risks.
@@ -644,7 +644,7 @@ VERDICT: ACCEPT | ITERATE | REJECT | ILL_POSED
 }
 
 function synthesisSystemPrompt(intensity: Intensity): string {
-	return `# Expert Ideation Synthesizer
+	return `# Workshop Synthesizer
 
 Merge expert critiques into one shared resolution and strongest revised idea. No ego. No false compromise.
 
@@ -662,7 +662,7 @@ Convergence rules:
 - Mark ACCEPT only if all blocking objections are resolved and acceptance criteria are testable.
 - Mark ITERATE if idea has promise but needs concrete revision before execution.
 - Mark REJECT if core premise fails or cost/risk dominates.
-- Mark ILL_POSED if key terms/goals/constraints are too undefined to debate productively.
+- Mark ILL_POSED if key terms/goals/constraints are too undefined to evaluate productively.
 - Mark UNRESOLVED and CONVERGED: NO if experts still materially disagree or user answers are required to decide.
 
 Strict output format:
@@ -707,7 +707,7 @@ function buildRoundPrompt(args: {
 	panelExperts: ExpertInput[];
 	assistantBriefPaths: string[];
 	prototyping: boolean;
-	debateDir: string;
+	workshopDir: string;
 }): string {
 	const context = args.contextPaths.length ? args.contextPaths.map((p) => `- ${p}`).join("\n") : "- (none supplied)";
 	const panel = args.panelExperts.map((e) => `- ${e.name}: ${e.stance}`).join("\n");
@@ -741,7 +741,7 @@ ${args.assistantBriefPaths.length ? args.assistantBriefPaths.map((p) => `- ${p}`
 If assistant briefs are present, read them before finalizing your critique. These subagents were launched by the parent orchestrator before your critique; they are not evidence that you personally called subagents. Treat them as junior research/scouting input, not authority. You own judgment and must correct or ignore weak brief claims.
 
 Scratch/prototype workspace:
-${args.prototyping ? `- Enabled. Use ${PROTOTYPE_TOOL} with debateDir=${args.debateDir} and expertName=${args.expertName}. Cite generated artifact paths and key outputs.` : "- Disabled."}
+${args.prototyping ? `- Enabled. Use ${PROTOTYPE_TOOL} with workshopDir=${args.workshopDir} and expertName=${args.expertName}. Cite generated artifact paths and key outputs.` : "- Disabled."}
 
 Write your answer in the strict format. End with exactly one VERDICT line.`;
 }
@@ -749,7 +749,7 @@ Write your answer in the strict format. End with exactly one VERDICT line.`;
 function plannerSystemPrompt(intensity: Intensity): string {
 	return `# Expert Panel Designer
 
-You design a small, high-signal expert panel for technical ideation.
+You design a small, high-signal workshop for technical ideation.
 
 ${intensityRules(intensity)}
 
@@ -775,7 +775,7 @@ Return JSON only, no markdown:
 }
 
 function buildPlannerPrompt(ideaPath: string, contextPaths: string[]): string {
-	return `Read the idea and choose the best expert panel.
+	return `Read the idea and choose the best workshop.
 
 Idea: ${ideaPath}
 Context paths:
@@ -829,14 +829,14 @@ async function runExpertAssistantBrief(args: {
 	workingPath: string;
 	contextPaths: string[];
 	baseCwd: string;
-	debateDir: string;
+	workshopDir: string;
 	research: boolean;
 	juniorModel: string;
 	signal?: AbortSignal;
 	onUpdate?: (text: string) => void;
 }): Promise<string> {
 	const safeName = args.expert.name.replace(/[^\w.-]+/g, "_");
-	const out = path.join(args.debateDir, `round_${args.round}_${safeName}_assistant_brief.md`);
+	const out = path.join(args.workshopDir, `round_${args.round}_${safeName}_assistant_brief.md`);
 	const context = args.contextPaths.length ? args.contextPaths.map((p) => `- ${p}`).join("\n") : "- none supplied";
 	const fallbackBriefs = [
 		{
@@ -926,7 +926,7 @@ function extractQuestions(text: string): string[] {
 }
 
 async function formatTranscript(roundFiles: string[], finalSynthesis: string): Promise<string> {
-	const chunks: string[] = ["# Expert panel transcript", "", `Final synthesis: ${finalSynthesis}`, ""];
+	const chunks: string[] = ["# Workshop transcript", "", `Final synthesis: ${finalSynthesis}`, ""];
 	for (const file of roundFiles) {
 		chunks.push("---", "", `## ${path.basename(file)}`, "", `Path: ${file}`, "");
 		chunks.push(await fs.readFile(file, "utf8").catch((err) => `[could not read: ${String(err)}]`));
@@ -936,7 +936,7 @@ async function formatTranscript(roundFiles: string[], finalSynthesis: string): P
 }
 
 async function generateHtmlReport(args: {
-	debateDir: string;
+	workshopDir: string;
 	ideaPath: string;
 	workflowPath: string;
 	answersPath: string;
@@ -945,8 +945,8 @@ async function generateHtmlReport(args: {
 	roundFiles: string[];
 	result: Omit<DebateResult, "summary" | "reportPath">;
 }): Promise<string> {
-	const reportPath = path.join(args.debateDir, "report.html");
-	const scratchRoot = path.join(args.debateDir, "scratch");
+	const reportPath = path.join(args.workshopDir, "report.html");
+	const scratchRoot = path.join(args.workshopDir, "scratch");
 	const scratchFiles = (await listFilesRecursive(scratchRoot)).filter((file) => file.endsWith(".md") || file.endsWith(".py") || file.endsWith(".ts") || file.endsWith(".js") || file.endsWith(".txt"));
 	const read = async (file: string) => fs.readFile(file, "utf8").catch((err) => `[could not read ${file}: ${String(err)}]`);
 	const idea = await read(args.ideaPath);
@@ -957,7 +957,7 @@ async function generateHtmlReport(args: {
 		const parts: string[] = [];
 		for (const file of files) {
 			const content = await read(file);
-			parts.push(`<details><summary>${escapeHtml(title)}: ${escapeHtml(path.relative(args.debateDir, file))}</summary><pre>${escapeHtml(content)}</pre></details>`);
+			parts.push(`<details><summary>${escapeHtml(title)}: ${escapeHtml(path.relative(args.workshopDir, file))}</summary><pre>${escapeHtml(content)}</pre></details>`);
 		}
 		return parts.join("\n");
 	};
@@ -966,7 +966,7 @@ async function generateHtmlReport(args: {
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Technical debate report — ${escapeHtml(args.result.status)}</title>
+<title>Pi workshop report — ${escapeHtml(args.result.status)}</title>
 <style>
 :root { color-scheme: light dark; --fg:#172033; --muted:#657084; --bg:#f6f8fb; --card:#fff; --border:#d8dee9; --accent:#3b82f6; --ok:#16a34a; --warn:#d97706; }
 @media (prefers-color-scheme: dark) { :root { --fg:#e5e7eb; --muted:#9ca3af; --bg:#111827; --card:#1f2937; --border:#374151; --accent:#60a5fa; --ok:#22c55e; --warn:#f59e0b; } }
@@ -985,8 +985,8 @@ summary { cursor:pointer; font-weight:650; }
 </style>
 </head>
 <body><main>
-<h1>Technical debate report <span class="badge">${escapeHtml(args.result.status)}</span></h1>
-<p class="path">${escapeHtml(args.debateDir)}</p>
+<h1>Pi workshop report <span class="badge">${escapeHtml(args.result.status)}</span></h1>
+<p class="path">${escapeHtml(args.workshopDir)}</p>
 <div class="grid">
   <div class="metric"><span>Status</span><b>${escapeHtml(args.result.status)}</b></div>
   <div class="metric"><span>Converged</span><b class="${args.result.converged ? "ok" : "warn"}">${args.result.converged ? "yes" : "no"}</b></div>
@@ -1011,7 +1011,7 @@ async function askUserForQuestions(ctx: any, round: number, questions: string[],
 	if (!ctx.hasUI || questions.length === 0) return false;
 	const prefill = questions.map((q, i) => `Q${i + 1}: ${q}\nA${i + 1}: `).join("\n\n");
 	const answer = await ctx.ui.editor(
-		`Technical debate round ${round}: answer blocking questions (optional)`,
+		`Pi workshop round ${round}: answer blocking questions (optional)`,
 		`${prefill}\n\nLeave blank/close to skip. Your answers become authoritative.`,
 	);
 	if (!answer?.trim()) return false;
@@ -1047,18 +1047,18 @@ async function runDebate(
 	const synthModel = params.synthModel ?? strongModel;
 	const juniorModel = params.juniorModel ?? providerQualifiedIfAvailable(ctx, inheritedProvider, DEFAULT_JUNIOR_MODEL) ?? inheritedModel ?? DEFAULT_JUNIOR_MODEL;
 	const contextPaths = (params.contextPaths ?? []).map((p) => resolveMaybe(baseCwd, p));
-	const debateDir = params.outputDir
+	const workshopDir = params.outputDir
 		? resolveMaybe(baseCwd, params.outputDir)
-		: path.join(baseCwd, ".pi", "technical-debates", `${timestampSlug()}-${slugify(params.idea)}`);
-	await fs.mkdir(debateDir, { recursive: true });
+		: path.join(baseCwd, ".pi", "workshops", `${timestampSlug()}-${slugify(params.idea)}`);
+	await fs.mkdir(workshopDir, { recursive: true });
 
-	const ideaPath = path.join(debateDir, "idea.md");
-	const workingPath = path.join(debateDir, "working-resolution.md");
-	const answersPath = path.join(debateDir, "user-answers.md");
-	const transcriptPath = path.join(debateDir, "transcript.md");
-	const finalPath = path.join(debateDir, "resolution.md");
-	const workflowPath = path.join(debateDir, "workflow.md");
-	await writeFileQueued(ideaPath, `# Technical idea under debate\n\n${params.idea.trim()}\n`);
+	const ideaPath = path.join(workshopDir, "idea.md");
+	const workingPath = path.join(workshopDir, "working-resolution.md");
+	const answersPath = path.join(workshopDir, "user-answers.md");
+	const transcriptPath = path.join(workshopDir, "transcript.md");
+	const finalPath = path.join(workshopDir, "resolution.md");
+	const workflowPath = path.join(workshopDir, "workflow.md");
+	await writeFileQueued(ideaPath, `# Technical idea for workshop\n\n${params.idea.trim()}\n`);
 	await writeFileQueued(
 		workingPath,
 		`# Working resolution\n\nInitial idea is untested. Experts must converge on ACCEPT, ITERATE, REJECT, ILL_POSED, or UNRESOLVED.\n`,
@@ -1068,9 +1068,9 @@ async function runDebate(
 	const allRoundFiles: string[] = [];
 	let experts: ExpertInput[] = params.experts?.length ? params.experts : DEFAULT_EXPERTS;
 	if (!params.experts?.length && params.planExperts !== false) {
-		onUpdate?.("Planning expert panel");
+		onUpdate?.("Planning workshop");
 		onPanelEvent?.({ type: "planner_start" });
-		const planPath = path.join(debateDir, "panel-plan.md");
+		const planPath = path.join(workshopDir, "panel-plan.md");
 		const planner = await runChildPi({
 			name: "panel-designer",
 			systemPrompt: plannerSystemPrompt(intensity),
@@ -1079,7 +1079,7 @@ async function runDebate(
 			model: plannerModel,
 			tools: researchEnabled ? RESEARCH_TOOLS : DEFAULT_TOOLS,
 			signal,
-			runDir: debateDir,
+			runDir: workshopDir,
 			onProgress: onUpdate,
 		});
 		await writeFileQueued(planPath, planner.text);
@@ -1119,7 +1119,7 @@ async function runDebate(
 			? `Experts can run throwaway experiments through ${PROTOTYPE_TOOL}; artifacts are under scratch/<expert>/ and included in report.html.`
 			: `Experts cannot run scratch experiments unless --prototype/--workshop or prototyping=true is used.`,
 	];
-	await writeFileQueued(workflowPath, `# Technical debate workflow\n\n${subagentWorkflow.map((line) => `- ${line}`).join("\n")}\n\n## Expert tools\n\n${experts.map((expert) => `- ${expert.name}: ${expert.tools}`).join("\n")}\n`);
+	await writeFileQueued(workflowPath, `# Pi workshop workflow\n\n${subagentWorkflow.map((line) => `- ${line}`).join("\n")}\n\n## Expert tools\n\n${experts.map((expert) => `- ${expert.name}: ${expert.tools}`).join("\n")}\n`);
 	allRoundFiles.push(workflowPath);
 	onPanelEvent?.({ type: "delegation_policy", lines: subagentWorkflow });
 	onUpdate?.(`Workflow: parent briefs ${parentBriefsEnabled ? "enabled" : "disabled"}; main expert subagents ${mainExpertsCanUseSubagents ? "enabled" : "disabled"}; prototypes ${prototypingEnabled ? "enabled" : "disabled"}; HTML ${htmlReportEnabled ? "enabled" : "disabled"}.`);
@@ -1146,7 +1146,7 @@ async function runDebate(
 						workingPath,
 						contextPaths,
 						baseCwd,
-						debateDir,
+						workshopDir,
 						research: researchEnabled,
 						juniorModel,
 						signal,
@@ -1157,7 +1157,7 @@ async function runDebate(
 					onPanelEvent?.({ type: "brief_done", round, name: expert.name, path: briefPath });
 				} catch (error) {
 					const safeName = expert.name.replace(/[^\w.-]+/g, "_");
-					const briefPath = path.join(debateDir, `round_${round}_${safeName}_assistant_brief_error.md`);
+					const briefPath = path.join(workshopDir, `round_${round}_${safeName}_assistant_brief_error.md`);
 					await writeFileQueued(briefPath, `# Assistant brief failed for ${expert.name}\n\n${String((error as Error)?.stack ?? error)}\n`);
 					assistantBriefs.set(expert.name, [briefPath]);
 					allRoundFiles.push(briefPath);
@@ -1169,18 +1169,18 @@ async function runDebate(
 		const previousCritiques =
 			round > 1
 				? experts
-					.map((e) => path.join(debateDir, `round_${round - 1}_${e.name.replace(/[^\w.-]+/g, "_")}.md`))
+					.map((e) => path.join(workshopDir, `round_${round - 1}_${e.name.replace(/[^\w.-]+/g, "_")}.md`))
 					.filter((p) => fssync.existsSync(p))
 				: [];
 
 		if (round === 1) {
 			await Promise.all(
 				experts.map(async (expert) => {
-					const out = path.join(debateDir, `round_${round}_${expert.name.replace(/[^\w.-]+/g, "_")}.md`);
+					const out = path.join(workshopDir, `round_${round}_${expert.name.replace(/[^\w.-]+/g, "_")}.md`);
 					onPanelEvent?.({ type: "expert_start", round, name: expert.name });
 					const run = await runChildPi({
 						name: expert.name,
-						systemPrompt: expertSystemPrompt(expert, intensity, expert.tools ?? DEFAULT_TOOLS, parentBriefsEnabled, prototypingEnabled, debateDir),
+						systemPrompt: expertSystemPrompt(expert, intensity, expert.tools ?? DEFAULT_TOOLS, parentBriefsEnabled, prototypingEnabled, workshopDir),
 						userPrompt: buildRoundPrompt({
 							round,
 							maxRounds: rounds,
@@ -1195,13 +1195,13 @@ async function runDebate(
 							panelExperts: experts,
 							assistantBriefPaths: assistantBriefs.get(expert.name) ?? [],
 							prototyping: prototypingEnabled,
-							debateDir,
+							workshopDir,
 						}),
 						cwd: baseCwd,
 						model: expert.model,
 						tools: expert.tools,
 						signal,
-						runDir: debateDir,
+						runDir: workshopDir,
 						onProgress: onUpdate,
 						onActivity: (text) => onPanelEvent?.({ type: "expert_activity", round, name: expert.name, text }),
 					});
@@ -1213,11 +1213,11 @@ async function runDebate(
 			);
 		} else {
 			for (const expert of experts) {
-				const out = path.join(debateDir, `round_${round}_${expert.name.replace(/[^\w.-]+/g, "_")}.md`);
+				const out = path.join(workshopDir, `round_${round}_${expert.name.replace(/[^\w.-]+/g, "_")}.md`);
 				onPanelEvent?.({ type: "expert_start", round, name: expert.name });
 				const run = await runChildPi({
 					name: expert.name,
-					systemPrompt: expertSystemPrompt(expert, intensity, expert.tools ?? DEFAULT_TOOLS, parentBriefsEnabled, prototypingEnabled, debateDir),
+					systemPrompt: expertSystemPrompt(expert, intensity, expert.tools ?? DEFAULT_TOOLS, parentBriefsEnabled, prototypingEnabled, workshopDir),
 					userPrompt: buildRoundPrompt({
 						round,
 						maxRounds: rounds,
@@ -1232,13 +1232,13 @@ async function runDebate(
 						panelExperts: experts,
 						assistantBriefPaths: assistantBriefs.get(expert.name) ?? [],
 						prototyping: prototypingEnabled,
-						debateDir,
+						workshopDir,
 					}),
 					cwd: baseCwd,
 					model: expert.model,
 					tools: expert.tools,
 					signal,
-					runDir: debateDir,
+					runDir: workshopDir,
 					onProgress: onUpdate,
 					onActivity: (text) => onPanelEvent?.({ type: "expert_activity", round, name: expert.name, text }),
 				});
@@ -1253,7 +1253,7 @@ async function runDebate(
 		allRoundFiles.push(...critiquePaths);
 		onUpdate?.(`Round ${round}/${rounds}: synthesis`);
 		onPanelEvent?.({ type: "synth_start", round });
-		const synthOut = path.join(debateDir, `round_${round}_synthesis.md`);
+		const synthOut = path.join(workshopDir, `round_${round}_synthesis.md`);
 		const synth = await runChildPi({
 			name: "synthesizer",
 			systemPrompt: synthesisSystemPrompt(intensity),
@@ -1270,7 +1270,7 @@ async function runDebate(
 			model: synthModel,
 			tools: researchEnabled ? RESEARCH_TOOLS : DEFAULT_TOOLS,
 			signal,
-			runDir: debateDir,
+			runDir: workshopDir,
 			onProgress: onUpdate,
 		});
 		await writeFileQueued(synthOut, synth.text);
@@ -1299,7 +1299,7 @@ async function runDebate(
 		status,
 		converged,
 		roundsRun,
-		debateDir,
+		workshopDir,
 		transcriptPath,
 		resolutionPath: finalPath,
 		workflowPath,
@@ -1308,7 +1308,7 @@ async function runDebate(
 	};
 	if (htmlReportEnabled) {
 		reportPath = await generateHtmlReport({
-			debateDir,
+			workshopDir,
 			ideaPath,
 			workflowPath,
 			answersPath,
@@ -1320,7 +1320,7 @@ async function runDebate(
 	}
 
 	const summary = [
-		`# Expert panel resolution`,
+		`# Workshop resolution`,
 		``,
 		`Status: **${status}**`,
 		`Converged: **${converged ? "yes" : "no"}** after ${roundsRun} round${roundsRun === 1 ? "" : "s"}`,
@@ -1331,7 +1331,7 @@ async function runDebate(
 		`- Workflow: ${workflowPath}`,
 		reportPath ? `- HTML report: ${reportPath}` : undefined,
 		`- Transcript: ${transcriptPath}`,
-		`- Debate dir: ${debateDir}`,
+		`- Workshop dir: ${workshopDir}`,
 		``,
 		`Subagent workflow:`,
 		...subagentWorkflow.map((line) => `- ${line}`),
@@ -1376,7 +1376,7 @@ function pushActivity(items: string[], text: string, limit = 4): void {
 
 function updateDashboardState(state: DashboardState, event: PanelEvent): void {
 	if (event.type === "planner_start") {
-		state.phase = "planning expert panel";
+		state.phase = "planning workshop";
 		state.lanes = new Map([["panel-designer", { name: "panel-designer", status: "running", activity: ["choosing expert mix"] }]]);
 		state.synthesis = { activity: [] };
 		return;
@@ -1479,7 +1479,7 @@ function renderDashboardLines(state: DashboardState, theme: any, width: number):
 	const phase = state.final
 		? `${state.final.status} (${state.final.converged ? "converged" : "not converged"})`
 		: `${state.phase} • round ${state.round || "?"}/${state.rounds || "?"}`;
-	lines.push(truncateToWidth(theme.fg("accent", theme.bold("expert panel observatory")) + theme.fg("muted", `  ${phase}`), w));
+	lines.push(truncateToWidth(theme.fg("accent", theme.bold("workshop observatory")) + theme.fg("muted", `  ${phase}`), w));
 
 	const flow = [
 		["plan", state.phase.includes("planning") || state.phase.includes("planned")],
@@ -1539,7 +1539,7 @@ function renderDashboardLines(state: DashboardState, theme: any, width: number):
 
 function installDashboardWidget(ctx: any, state: DashboardState): void {
 	ctx.ui.setWidget(
-		"technical-debate-dashboard",
+		"pi-workshop-dashboard",
 		(_tui: any, theme: any) => ({
 			render: (width: number) => renderDashboardLines(state, theme, width),
 			invalidate: () => {},
@@ -1552,7 +1552,7 @@ async function listDebateSessions(cwd: string): Promise<Array<{ dir: string; lab
 	const roots: string[] = [];
 	let probe = cwd;
 	while (true) {
-		const root = path.join(probe, ".pi", "technical-debates");
+		const root = path.join(probe, ".pi", "workshops");
 		if (!roots.includes(root)) roots.push(root);
 		const parent = path.dirname(probe);
 		if (parent === probe || probe === os.homedir()) break;
@@ -1678,7 +1678,7 @@ function parseDebateCommand(args: string): Pick<DebateInput, "idea" | "rounds" |
 }
 
 export default function technicalDebate(pi: ExtensionAPI) {
-	pi.registerMessageRenderer("technical-debate", (message, _options, _theme) => {
+	pi.registerMessageRenderer("pi-workshop", (message, _options, _theme) => {
 		return new Markdown(String(message.content ?? ""), 0, 0, getMarkdownTheme());
 	});
 
@@ -1686,13 +1686,13 @@ export default function technicalDebate(pi: ExtensionAPI) {
 		name: PROTOTYPE_TOOL,
 		label: "Debate Scratchpad",
 		description:
-			"Create/run small throwaway prototype experiments for a technical_debate expert inside the debate artifact directory. Enforces all files stay under <debateDir>/scratch/<expertName> and records command output for the final report.",
-		promptSnippet: "Run isolated scratch/prototype code experiments for expert-panel debates and save outputs as artifacts.",
+			"Create/run small throwaway prototype experiments for a workshop expert inside the workshop artifact directory. Enforces all files stay under <workshopDir>/scratch/<expertName> and records command output for the final report.",
+		promptSnippet: "Run isolated scratch/prototype code experiments for pi-workshop and save outputs as artifacts.",
 		promptGuidelines: [
-			"Use debate_scratch only when technical_debate/workshop prompts provide a debateDir; keep experiments small, cite artifact paths, and do not use it for project mutations.",
+			"Use workshop_scratch only when workshop prompts provide a workshopDir; keep experiments small, cite artifact paths, and do not use it for project mutations.",
 		],
 		parameters: Type.Object({
-			debateDir: Type.String({ description: "Absolute or cwd-relative .pi/technical-debates/<run> artifact directory" }),
+			workshopDir: Type.String({ description: "Absolute or cwd-relative .pi/workshops/<run> artifact directory" }),
 			expertName: Type.String({ description: "Expert lane/name using this scratchpad" }),
 			label: Type.Optional(Type.String({ description: "Short label for this run, e.g. timing-check or parser-prototype" })),
 			files: Type.Optional(Type.Array(Type.Object({
@@ -1713,11 +1713,11 @@ export default function technicalDebate(pi: ExtensionAPI) {
 			} else {
 				timeoutSeconds = Math.max(1, timeoutSeconds);
 			}
-			const debateDir = resolveMaybe(ctx.cwd, params.debateDir);
-			if (!debateDir.includes(`${path.sep}.pi${path.sep}technical-debates${path.sep}`)) {
-				throw new Error("debateDir must point inside a .pi/technical-debates run directory");
+			const workshopDir = resolveMaybe(ctx.cwd, params.workshopDir);
+			if (!workshopDir.includes(`${path.sep}.pi${path.sep}workshops${path.sep}`)) {
+				throw new Error("workshopDir must point inside a .pi/workshops run directory");
 			}
-			const scratchRoot = path.join(debateDir, "scratch", safeSegment(params.expertName));
+			const scratchRoot = path.join(workshopDir, "scratch", safeSegment(params.expertName));
 			await fs.mkdir(scratchRoot, { recursive: true });
 			const writtenFiles: string[] = [];
 			for (const file of params.files ?? []) {
@@ -1781,7 +1781,7 @@ export default function technicalDebate(pi: ExtensionAPI) {
 			};
 		},
 		renderCall(args, theme) {
-			return new Text(theme.fg("toolTitle", theme.bold("debate_scratch ")) + theme.fg("accent", args.expertName ?? "expert") + "\n" + theme.fg("dim", args.label ?? args.command ?? "scratch run"), 0, 0);
+			return new Text(theme.fg("toolTitle", theme.bold("workshop_scratch ")) + theme.fg("accent", args.expertName ?? "expert") + "\n" + theme.fg("dim", args.label ?? args.command ?? "scratch run"), 0, 0);
 		},
 		renderResult(result, _options, theme) {
 			const details = result.details as { artifactPath?: string; code?: number } | undefined;
@@ -1790,15 +1790,15 @@ export default function technicalDebate(pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "technical_debate",
-		label: "Expert Ideation Panel",
+		name: "workshop",
+		label: "Pi Workshop",
 		description:
-			"Run an intense multi-agent expert ideation/debate panel over an idea until experts converge on ACCEPT, ITERATE, REJECT, ILL_POSED, or hit the round cap. Writes artifacts under .pi/technical-debates by default.",
-		promptSnippet: "Ideate and stress-test technical ideas with independent world-class expert subprocesses until a shared resolution or round cap.",
+			"Run a recursive expert workshop over an idea until experts converge on ACCEPT, ITERATE, REJECT, ILL_POSED, or hit the round cap. Writes artifacts under .pi/workshops by default.",
+		promptSnippet: "Ideate, research, prototype, and stress-test technical ideas with independent expert subprocesses until a shared resolution or round cap.",
 		promptGuidelines: [
-			"Use technical_debate when the user asks to debate, ideate, stress-test, grill, or resolve a technical idea with multiple expert viewpoints.",
-			"technical_debate can improve an idea, conclude it needs iteration, reject it, or declare it too poorly posed to proceed.",
-			"Set technical_debate workshop=true when the user wants RLM-style recursive delegation, expert subagent calls, executable scratch prototypes, background research, and an HTML report of evidence.",
+			"Use workshop when the user asks to ideate, stress-test, grill, or resolve a technical idea with multiple expert viewpoints.",
+			"workshop can improve an idea, conclude it needs iteration, reject it, or declare it too poorly posed to proceed.",
+			"Set workshop=true or profile='workshop' when the user wants RLM-style recursive delegation, expert subagent calls, executable scratch prototypes, background research, and an HTML report of evidence.",
 		],
 		parameters: DebateParams,
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
@@ -1817,7 +1817,7 @@ export default function technicalDebate(pi: ExtensionAPI) {
 		renderCall(args, theme) {
 			const preview = typeof args.idea === "string" ? args.idea.slice(0, 80) : "...";
 			return new Text(
-				theme.fg("toolTitle", theme.bold("expert_panel ")) +
+				theme.fg("toolTitle", theme.bold("workshop ")) +
 					theme.fg("accent", `${args.rounds ?? DEFAULT_ROUNDS} rounds`) +
 					"\n" +
 					theme.fg("dim", preview),
@@ -1833,7 +1833,7 @@ export default function technicalDebate(pi: ExtensionAPI) {
 			}
 			const icon = details.converged ? theme.fg("success", "✓") : theme.fg("warning", "◐");
 			return new Text(
-				`${icon} ${theme.fg("toolTitle", theme.bold("expert panel"))} ${theme.fg("accent", details.status)}\n` +
+				`${icon} ${theme.fg("toolTitle", theme.bold("workshop"))} ${theme.fg("accent", details.status)}\n` +
 					`${theme.fg("muted", `${details.roundsRun} rounds • ${details.experts.join(", ")}`)}\n` +
 					`${theme.fg("dim", details.reportPath ?? details.resolutionPath)}`,
 				0,
@@ -1842,41 +1842,38 @@ export default function technicalDebate(pi: ExtensionAPI) {
 		},
 	});
 
-	const runIdeationCommand = async (args: string, ctx: any, commandName: "debate" | "ideate") => {
+	const runWorkshopCommand = async (args: string, ctx: any) => {
 		const parsed = parseDebateCommand(args);
 		let idea = parsed.idea;
 		if (!idea) {
 			if (!ctx.hasUI) {
-				ctx.ui.notify(`Usage: /${commandName} <technical idea>`, "warning");
+				ctx.ui.notify("Usage: /workshop <technical idea>", "warning");
 				return;
 			}
 			const edited = await ctx.ui.editor(
-				"Technical idea for expert panel",
+				"Technical idea for workshop",
 				"Paste proposal / PRD excerpt / architecture here...\n\nFlags: --workshop --profile workshop --rounds 4 --research --subagents --expert-subagents --prototype --html-report --fixed-experts",
 			);
 			idea = edited?.trim() ?? "";
 		}
 		if (!idea) {
-			ctx.ui.notify("Expert panel canceled: no idea provided", "warning");
+			ctx.ui.notify("Workshop canceled: no idea provided", "warning");
 			return;
 		}
 		const dashboard = createDashboardState();
 		if (ctx.hasUI) installDashboardWidget(ctx, dashboard);
-		ctx.ui.setStatus("technical-debate", "expert panel starting...");
+		ctx.ui.setStatus("pi-workshop", "workshop starting...");
 		try {
 			const result = await runDebate(
 				pi,
 				{ ...parsed, idea, interactive: true },
 				ctx,
 				undefined,
-				(text) => ctx.ui.setStatus("technical-debate", text),
+				(text) => ctx.ui.setStatus("pi-workshop", text),
 				(artifact) => {
-					const title =
-						artifact.kind === "critique"
-							? `# Round ${artifact.round}: ${artifact.name} critique`
-							: `# Round ${artifact.round}: synthesis`;
+					const title = artifact.kind === "critique" ? `# Round ${artifact.round}: ${artifact.name} critique` : `# Round ${artifact.round}: synthesis`;
 					pi.sendMessage({
-						customType: "technical-debate",
+						customType: "pi-workshop",
 						content: `${title}\n\nPath: ${artifact.path}\n\n---\n\n${artifact.text}`,
 						display: true,
 						details: artifact,
@@ -1887,20 +1884,20 @@ export default function technicalDebate(pi: ExtensionAPI) {
 					if (ctx.hasUI) installDashboardWidget(ctx, dashboard);
 				},
 			);
-			pi.sendMessage({ customType: "technical-debate", content: result.summary, display: true, details: result });
+			pi.sendMessage({ customType: "pi-workshop", content: result.summary, display: true, details: result });
 		} finally {
-			ctx.ui.setStatus("technical-debate", undefined);
-			if (!parsed.keepDashboard) ctx.ui.setWidget("technical-debate-dashboard", undefined);
+			ctx.ui.setStatus("pi-workshop", undefined);
+			if (!parsed.keepDashboard) ctx.ui.setWidget("pi-workshop-dashboard", undefined);
 		}
 	};
 
-	pi.registerCommand("ideate-config", {
-		description: "Show resolved technical-debate config. Usage: /ideate-config [--profile workshop]",
+	pi.registerCommand("workshop-config", {
+		description: "Show resolved pi-workshop config. Usage: /workshop-config [--profile workshop]",
 		handler: async (args, ctx) => {
 			const parsed = parseDebateCommand(args);
 			const resolved = await resolveDebateConfig(ctx.cwd, { ...parsed, idea: "config preview" });
 			const content = [
-				"# Technical debate config",
+				"# Pi workshop config",
 				"",
 				`Config files: ${resolved.configPaths.length ? resolved.configPaths.join(", ") : "built-in defaults only"}`,
 				`Profile: ${resolved.profile ?? "none"}`,
@@ -1916,60 +1913,54 @@ export default function technicalDebate(pi: ExtensionAPI) {
 				"```",
 				"",
 				"Config locations checked:",
-				`- ${path.join(os.homedir(), ".pi", "agent", "technical-debate.config.json")}`,
-				`- nearest project .pi/technical-debate.config.json from ${ctx.cwd}`,
+				`- ${path.join(os.homedir(), ".pi", "agent", "pi-workshop.config.json")}`,
+				`- nearest project .pi/pi-workshop.config.json from ${ctx.cwd}`,
 			].join("\n");
-			pi.sendMessage({ customType: "technical-debate", content, display: true, details: resolved });
+			pi.sendMessage({ customType: "pi-workshop", content, display: true, details: resolved });
 		},
 	});
 
-	pi.registerCommand("debate", {
+	pi.registerCommand("workshop", {
 		description:
-			"Run an adversarial expert panel. Usage: /debate [--workshop|--profile workshop] [--rounds 4] [--research] [--subagents] [--expert-subagents] [--prototype] [--html-report] [--fixed-experts] <idea>",
-		handler: async (args, ctx) => runIdeationCommand(args, ctx, "debate"),
+			"Run a recursive expert workshop. Usage: /workshop [--profile workshop] [--rounds 4] [--research] [--subagents] [--expert-subagents] [--prototype] [--html-report] [--fixed-experts] <idea>",
+		handler: async (args, ctx) => runWorkshopCommand(args, ctx),
 	});
 
-	pi.registerCommand("ideate", {
-		description:
-			"Run a world-class expert ideation panel. Usage: /ideate [--workshop|--profile workshop] [--rounds 4] [--research] [--subagents] [--expert-subagents] [--prototype] [--html-report] [--fixed-experts] <idea>",
-		handler: async (args, ctx) => runIdeationCommand(args, ctx, "ideate"),
-	});
-
-	pi.registerCommand("ideate-hide", {
-		description: "Hide the persistent expert-panel observatory widget",
+	pi.registerCommand("workshop-hide", {
+		description: "Hide the persistent workshop observatory widget",
 		handler: async (_args, ctx) => {
-			ctx.ui.setWidget("technical-debate-dashboard", undefined);
-			ctx.ui.notify("Expert panel observatory hidden", "info");
+			ctx.ui.setWidget("pi-workshop-dashboard", undefined);
+			ctx.ui.notify("Workshop observatory hidden", "info");
 		},
 	});
 
-	pi.registerCommand("ideate-sessions", {
-		description: "Pick a previous ideation/debate session and show its saved resolution",
+	pi.registerCommand("workshop-sessions", {
+		description: "Pick a previous workshop session and show its saved resolution",
 		handler: async (_args, ctx) => {
 			const sessions = await listDebateSessions(ctx.cwd);
 			if (sessions.length === 0) {
-				ctx.ui.notify("No previous .pi/technical-debates sessions found", "warning");
+				ctx.ui.notify("No previous .pi/workshops sessions found", "warning");
 				return;
 			}
 			const chosen = ctx.hasUI
-				? await ctx.ui.select("Previous expert-panel sessions", sessions.map((s) => s.label))
+				? await ctx.ui.select("Previous workshop sessions", sessions.map((s) => s.label))
 				: sessions[0].label;
 			const session = sessions.find((s) => s.label === chosen);
 			if (!session) return;
 			const resolutionPath = path.join(session.dir, "resolution.md");
 			const resolution = await fs.readFile(resolutionPath, "utf8").catch(() => "(could not read resolution.md)");
 			pi.sendMessage({
-				customType: "technical-debate",
-				content: `# Previous expert-panel session\n\nPath: ${session.dir}\n\n---\n\n${resolution}`,
+				customType: "pi-workshop",
+				content: `# Previous workshop session\n\nPath: ${session.dir}\n\n---\n\n${resolution}`,
 				display: true,
 				details: { dir: session.dir, resolutionPath },
 			});
 		},
 	});
 
-	pi.registerCommand("ideate-pickup", {
+	pi.registerCommand("workshop-pickup", {
 		description:
-			"Continue from a previous expert-panel session. Usage: /ideate-pickup [--rounds 2] [--research] [optional session-dir or instructions]",
+			"Continue from a previous workshop session. Usage: /workshop-pickup [--rounds 2] [--research] [optional session-dir or instructions]",
 		handler: async (args, ctx) => {
 			const parsed = parseDebateCommand(args);
 			let targetDir: string | undefined;
@@ -1984,7 +1975,7 @@ export default function technicalDebate(pi: ExtensionAPI) {
 			if (!targetDir) {
 				const sessions = await listDebateSessions(ctx.cwd);
 				if (sessions.length === 0) {
-					ctx.ui.notify("No previous .pi/technical-debates sessions found", "warning");
+					ctx.ui.notify("No previous .pi/workshops sessions found", "warning");
 					return;
 				}
 				const chosen = ctx.hasUI
@@ -2000,16 +1991,16 @@ export default function technicalDebate(pi: ExtensionAPI) {
 			const previousResolution = await fs.readFile(resolutionPath, "utf8");
 			if (ctx.hasUI) {
 				const edited = await ctx.ui.editor(
-					"Continue previous expert-panel session",
+					"Continue previous workshop session",
 					`${extraInstructions || "Answer open questions, tighten scope, or ask for next-round critique."}\n\nPrevious session:\n${targetDir}`,
 				);
 				extraInstructions = edited?.trim() ?? extraInstructions;
 			}
 
-			const idea = `Continue this previous expert-panel ideation session.\n\nPrevious session dir: ${targetDir}\nPrevious resolution:\n\n${previousResolution}\n\nUser continuation instructions:\n${extraInstructions || "Continue from remaining open questions and produce a sharper next resolution."}`;
+			const idea = `Continue this previous workshop ideation session.\n\nPrevious session dir: ${targetDir}\nPrevious resolution:\n\n${previousResolution}\n\nUser continuation instructions:\n${extraInstructions || "Continue from remaining open questions and produce a sharper next resolution."}`;
 			const dashboard = createDashboardState();
 			if (ctx.hasUI) installDashboardWidget(ctx, dashboard);
-			ctx.ui.setStatus("technical-debate", "picking up previous session...");
+			ctx.ui.setStatus("pi-workshop", "picking up previous session...");
 			try {
 				const result = await runDebate(
 					pi,
@@ -2021,11 +2012,11 @@ export default function technicalDebate(pi: ExtensionAPI) {
 					},
 					ctx,
 					undefined,
-					(text) => ctx.ui.setStatus("technical-debate", text),
+					(text) => ctx.ui.setStatus("pi-workshop", text),
 					(artifact) => {
 						const title = artifact.kind === "critique" ? `# Round ${artifact.round}: ${artifact.name} critique` : `# Round ${artifact.round}: synthesis`;
 						pi.sendMessage({
-							customType: "technical-debate",
+							customType: "pi-workshop",
 							content: `${title}\n\nPath: ${artifact.path}\n\n---\n\n${artifact.text}`,
 							display: true,
 							details: artifact,
@@ -2036,10 +2027,10 @@ export default function technicalDebate(pi: ExtensionAPI) {
 						if (ctx.hasUI) installDashboardWidget(ctx, dashboard);
 					},
 				);
-				pi.sendMessage({ customType: "technical-debate", content: result.summary, display: true, details: result });
+				pi.sendMessage({ customType: "pi-workshop", content: result.summary, display: true, details: result });
 			} finally {
-				ctx.ui.setStatus("technical-debate", undefined);
-				if (!parsed.keepDashboard) ctx.ui.setWidget("technical-debate-dashboard", undefined);
+				ctx.ui.setStatus("pi-workshop", undefined);
+				if (!parsed.keepDashboard) ctx.ui.setWidget("pi-workshop-dashboard", undefined);
 			}
 		},
 	});
