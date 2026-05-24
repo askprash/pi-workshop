@@ -11,6 +11,8 @@ import { Type, type Static } from "typebox";
 
 const MAX_ROUNDS = 8;
 const DEFAULT_ROUNDS = 4;
+const DEFAULT_SCRATCH_TIMEOUT_SECONDS = 60;
+const DEFAULT_MAX_SCRATCH_TIMEOUT_SECONDS = 300;
 const DEFAULT_TOOLS = "read,grep,find,ls";
 const RESEARCH_TOOLS = "read,grep,find,ls,bash,web_search,fetch_content,get_search_content,code_search";
 const PROTOTYPE_TOOL = "debate_scratch";
@@ -38,7 +40,7 @@ const ExpertSchema = Type.Object({
 const DebateParams = Type.Object({
 	idea: Type.String({ description: "Technical idea, proposal, PRD excerpt, architecture, or question to debate" }),
 	rounds: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_ROUNDS, default: DEFAULT_ROUNDS })),
-	intensity: Type.Optional(StringEnum(["normal", "hard", "ruthless"] as const, { default: "ruthless" })),
+	profile: Type.Optional(Type.String({ description: "Named config profile to apply, e.g. workshop or safe. --workshop is shorthand for profile=workshop." })),
 	experts: Type.Optional(Type.Array(ExpertSchema, { minItems: 2, maxItems: 4 })),
 	contextPaths: Type.Optional(
 		Type.Array(Type.String(), { description: "Files/directories experts should inspect before making codebase claims" }),
@@ -90,13 +92,73 @@ const DebateParams = Type.Object({
 	workshop: Type.Optional(
 		Type.Boolean({
 			description:
-				"Convenience mode for RLM-style ideation: enables parent briefs, direct expert subagents, prototyping, research, and HTML report unless explicitly overridden. Slash command flag: --workshop.",
+				"Convenience shorthand for profile=workshop. The actual behavior is configurable in technical-debate.config.json.",
 		}),
 	),
 });
 
 type ExpertInput = Static<typeof ExpertSchema>;
 type DebateInput = Static<typeof DebateParams>;
+
+type DebateConfig = {
+	defaults?: Partial<Omit<DebateInput, "idea" | "experts" | "contextPaths" | "outputDir" | "cwd">> & { keepDashboard?: boolean };
+	profiles?: Record<string, Partial<Omit<DebateInput, "idea" | "experts" | "contextPaths" | "outputDir" | "cwd">> & { keepDashboard?: boolean }>;
+	models?: {
+		strongModel?: string;
+		plannerModel?: string;
+		expertModel?: string;
+		juniorModel?: string;
+		synthModel?: string;
+	};
+	limits?: {
+		maxRounds?: number;
+		scratchTimeoutSeconds?: number;
+		maxScratchTimeoutSeconds?: number;
+	};
+};
+
+type ResolvedDebateConfig = {
+	params: DebateInput & { keepDashboard?: boolean };
+	limits: Required<NonNullable<DebateConfig["limits"]>>;
+	configPaths: string[];
+	profile?: string;
+};
+
+const BUILTIN_CONFIG: Required<Pick<DebateConfig, "defaults" | "profiles" | "models" | "limits">> = {
+	defaults: {
+		rounds: DEFAULT_ROUNDS,
+		research: false,
+		planExperts: true,
+		subagents: false,
+		expertSubagents: false,
+		prototyping: false,
+		htmlReport: false,
+		workshop: false,
+		keepDashboard: false,
+	},
+	profiles: {
+		workshop: {
+			research: true,
+			subagents: true,
+			expertSubagents: true,
+			prototyping: true,
+			htmlReport: true,
+		},
+		safe: {
+			research: true,
+			subagents: true,
+			expertSubagents: false,
+			prototyping: false,
+			htmlReport: true,
+		},
+	},
+	models: {},
+	limits: {
+		maxRounds: MAX_ROUNDS,
+		scratchTimeoutSeconds: DEFAULT_SCRATCH_TIMEOUT_SECONDS,
+		maxScratchTimeoutSeconds: DEFAULT_MAX_SCRATCH_TIMEOUT_SECONDS,
+	},
+};
 
 type ChildRun = {
 	name: string;
@@ -188,6 +250,87 @@ function providerQualifiedIfAvailable(ctx: any, provider: string | undefined, mo
 	} catch {
 		return undefined;
 	}
+}
+
+function mergeConfig(a: DebateConfig, b: DebateConfig): DebateConfig {
+	const profiles: NonNullable<DebateConfig["profiles"]> = { ...(a.profiles ?? {}) };
+	for (const [name, profile] of Object.entries(b.profiles ?? {})) {
+		profiles[name] = { ...(profiles[name] ?? {}), ...profile };
+	}
+	return {
+		defaults: { ...(a.defaults ?? {}), ...(b.defaults ?? {}) },
+		profiles,
+		models: { ...(a.models ?? {}), ...(b.models ?? {}) },
+		limits: { ...(a.limits ?? {}), ...(b.limits ?? {}) },
+	};
+}
+
+function definedOnly<T extends Record<string, any>>(obj: T): Partial<T> {
+	return Object.fromEntries(Object.entries(obj).filter(([, value]) => value !== undefined)) as Partial<T>;
+}
+
+async function readConfigFile(filePath: string): Promise<DebateConfig | undefined> {
+	try {
+		const text = await fs.readFile(filePath, "utf8");
+		const parsed = JSON.parse(text) as DebateConfig;
+		return parsed && typeof parsed === "object" ? parsed : undefined;
+	} catch (error) {
+		if ((error as any)?.code === "ENOENT") return undefined;
+		throw new Error(`Failed to read technical debate config ${filePath}: ${String((error as Error)?.message ?? error)}`);
+	}
+}
+
+async function findProjectConfig(cwd: string): Promise<string | undefined> {
+	let probe = cwd;
+	while (true) {
+		const candidate = path.join(probe, ".pi", "technical-debate.config.json");
+		if (fssync.existsSync(candidate)) return candidate;
+		const parent = path.dirname(probe);
+		if (parent === probe || probe === os.homedir()) return undefined;
+		probe = parent;
+	}
+}
+
+async function resolveDebateConfig(cwd: string, params: DebateInput & { keepDashboard?: boolean }): Promise<ResolvedDebateConfig> {
+	let config: DebateConfig = BUILTIN_CONFIG;
+	const configPaths: string[] = [];
+	const globalPath = path.join(os.homedir(), ".pi", "agent", "technical-debate.config.json");
+	const globalConfig = await readConfigFile(globalPath);
+	if (globalConfig) {
+		config = mergeConfig(config, globalConfig);
+		configPaths.push(globalPath);
+	}
+	const projectPath = await findProjectConfig(cwd);
+	if (projectPath) {
+		const projectConfig = await readConfigFile(projectPath);
+		if (projectConfig) {
+			config = mergeConfig(config, projectConfig);
+			configPaths.push(projectPath);
+		}
+	}
+	const requestedProfile = params.workshop ? "workshop" : params.profile;
+	const profileValues = requestedProfile ? (config.profiles?.[requestedProfile] ?? {}) : {};
+	const modelValues = config.models ?? {};
+	const mergedParams = definedOnly({
+		...(config.defaults ?? {}),
+		...profileValues,
+		...modelValues,
+		...definedOnly(params),
+	});
+	const maxRounds = Math.max(1, Math.min(MAX_ROUNDS, Number(config.limits?.maxRounds ?? MAX_ROUNDS)));
+	const rounds = Math.max(1, Math.min(maxRounds, Number(mergedParams.rounds ?? DEFAULT_ROUNDS)));
+	const maxScratchTimeoutSeconds = Math.max(1, Number(config.limits?.maxScratchTimeoutSeconds ?? DEFAULT_MAX_SCRATCH_TIMEOUT_SECONDS));
+	const scratchTimeoutSeconds = Math.max(1, Math.min(maxScratchTimeoutSeconds, Number(config.limits?.scratchTimeoutSeconds ?? DEFAULT_SCRATCH_TIMEOUT_SECONDS)));
+	return {
+		params: { ...mergedParams, rounds } as DebateInput & { keepDashboard?: boolean },
+		limits: {
+			maxRounds,
+			scratchTimeoutSeconds,
+			maxScratchTimeoutSeconds,
+		},
+		configPaths,
+		profile: requestedProfile,
+	};
 }
 
 async function writeFileQueued(filePath: string, content: string): Promise<void> {
@@ -886,14 +1029,16 @@ async function runDebate(
 	onPanelEvent?: (event: PanelEvent) => void,
 ): Promise<DebateResult> {
 	const baseCwd = resolveMaybe(ctx.cwd, params.cwd ?? ".");
-	const rounds = Math.max(1, Math.min(MAX_ROUNDS, params.rounds ?? DEFAULT_ROUNDS));
-	const intensity = (params.intensity ?? "ruthless") as Intensity;
-	const workshop = Boolean(params.workshop);
-	const researchEnabled = Boolean(params.research || workshop);
-	const parentBriefsEnabled = Boolean(params.subagents || workshop);
-	const expertSubagentsEnabled = Boolean(params.expertSubagents || workshop);
-	const prototypingEnabled = Boolean(params.prototyping || workshop);
-	const htmlReportEnabled = Boolean(params.htmlReport || workshop);
+	const resolvedConfig = await resolveDebateConfig(baseCwd, params);
+	params = resolvedConfig.params;
+	const rounds = params.rounds ?? DEFAULT_ROUNDS;
+	const intensity: Intensity = "hard";
+	const workshop = Boolean(params.workshop || resolvedConfig.profile === "workshop");
+	const researchEnabled = Boolean(params.research);
+	const parentBriefsEnabled = Boolean(params.subagents);
+	const expertSubagentsEnabled = Boolean(params.expertSubagents);
+	const prototypingEnabled = Boolean(params.prototyping);
+	const htmlReportEnabled = Boolean(params.htmlReport);
 	const inheritedModel = activeModelRef(ctx);
 	const inheritedProvider = activeProvider(ctx);
 	const strongModel = params.strongModel ?? inheritedModel ?? DEFAULT_STRONG_MODEL;
@@ -956,6 +1101,9 @@ async function runDebate(
 	});
 	const mainExpertsCanUseSubagents = experts.some((expert) => toolListIncludes(expert.tools, "subagent"));
 	const subagentWorkflow = [
+		`Config files: ${resolvedConfig.configPaths.length ? resolvedConfig.configPaths.join(", ") : "built-in defaults only"}`,
+		`Profile: ${resolvedConfig.profile ?? "none"}`,
+		`Scratch timeout: ${resolvedConfig.limits.scratchTimeoutSeconds}s default, ${resolvedConfig.limits.maxScratchTimeoutSeconds}s max before approval/escalation`,
 		`Workshop mode (--workshop): ${workshop ? "enabled" : "disabled"}`,
 		`Parent-orchestrated assistant briefs (--subagents): ${parentBriefsEnabled ? "enabled" : "disabled"}`,
 		`Main expert direct subagent tool: ${mainExpertsCanUseSubagents ? "enabled" : "disabled"}`,
@@ -1437,18 +1585,18 @@ async function listDebateSessions(cwd: string): Promise<Array<{ dir: string; lab
 	return sessions.sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, 30);
 }
 
-function parseDebateCommand(args: string): Pick<DebateInput, "idea" | "rounds" | "intensity" | "research" | "planExperts" | "subagents" | "expertSubagents" | "prototyping" | "htmlReport" | "workshop" | "strongModel" | "plannerModel" | "expertModel" | "juniorModel" | "synthModel"> & { keepDashboard?: boolean } {
+function parseDebateCommand(args: string): Pick<DebateInput, "idea" | "rounds" | "profile" | "research" | "planExperts" | "subagents" | "expertSubagents" | "prototyping" | "htmlReport" | "workshop" | "strongModel" | "plannerModel" | "expertModel" | "juniorModel" | "synthModel"> & { keepDashboard?: boolean } {
 	const parts = args.match(/(?:[^\s"]+|"[^"]*")+/g) ?? [];
-	let rounds = DEFAULT_ROUNDS;
-	let intensity: Intensity = "ruthless";
-	let research = false;
-	let planExperts = true;
-	let keepDashboard = false;
-	let subagents = false;
-	let expertSubagents = false;
-	let prototyping = false;
-	let htmlReport = false;
-	let workshop = false;
+	let rounds: number | undefined;
+	let profile: string | undefined;
+	let research: boolean | undefined;
+	let planExperts: boolean | undefined;
+	let keepDashboard: boolean | undefined;
+	let subagents: boolean | undefined;
+	let expertSubagents: boolean | undefined;
+	let prototyping: boolean | undefined;
+	let htmlReport: boolean | undefined;
+	let workshop: boolean | undefined;
 	let strongModel: string | undefined;
 	let plannerModel: string | undefined;
 	let expertModel: string | undefined;
@@ -1465,12 +1613,12 @@ function parseDebateCommand(args: string): Pick<DebateInput, "idea" | "rounds" |
 			rounds = Number(raw.slice("--rounds=".length));
 			continue;
 		}
-		if (raw === "--intensity" && parts[i + 1]) {
-			intensity = parts[++i].replace(/^"|"$/g, "") as Intensity;
+		if (raw === "--profile" && parts[i + 1]) {
+			profile = parts[++i].replace(/^"|"$/g, "");
 			continue;
 		}
-		if (raw.startsWith("--intensity=")) {
-			intensity = raw.slice("--intensity=".length) as Intensity;
+		if (raw.startsWith("--profile=")) {
+			profile = raw.slice("--profile=".length);
 			continue;
 		}
 		if (raw === "--research" || raw === "--web") {
@@ -1479,6 +1627,10 @@ function parseDebateCommand(args: string): Pick<DebateInput, "idea" | "rounds" |
 		}
 		if (raw === "--fixed-experts" || raw === "--no-plan") {
 			planExperts = false;
+			continue;
+		}
+		if (raw === "--plan") {
+			planExperts = true;
 			continue;
 		}
 		if (raw === "--keep-dashboard") {
@@ -1503,11 +1655,6 @@ function parseDebateCommand(args: string): Pick<DebateInput, "idea" | "rounds" |
 		}
 		if (raw === "--workshop" || raw === "--rlm") {
 			workshop = true;
-			research = true;
-			subagents = true;
-			expertSubagents = true;
-			prototyping = true;
-			htmlReport = true;
 			continue;
 		}
 		const readValue = (prefix: string): string | undefined => {
@@ -1527,7 +1674,7 @@ function parseDebateCommand(args: string): Pick<DebateInput, "idea" | "rounds" |
 		if (synth) { synthModel = synth; continue; }
 		ideaParts.push(raw);
 	}
-	return { idea: ideaParts.join(" ").trim(), rounds, intensity, research, planExperts, subagents, expertSubagents, prototyping, htmlReport, workshop, strongModel, plannerModel, expertModel, juniorModel, synthModel, keepDashboard };
+	return { idea: ideaParts.join(" ").trim(), rounds, profile, research, planExperts, subagents, expertSubagents, prototyping, htmlReport, workshop, strongModel, plannerModel, expertModel, juniorModel, synthModel, keepDashboard };
 }
 
 export default function technicalDebate(pi: ExtensionAPI) {
@@ -1553,9 +1700,19 @@ export default function technicalDebate(pi: ExtensionAPI) {
 				content: Type.String(),
 			}), { description: "Optional files to create before running the command" })),
 			command: Type.Optional(Type.String({ description: "Optional shell command to run from the expert scratch directory" })),
-			timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 120, default: 20 })),
+			timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, description: "Requested timeout for this scratch command. Defaults to config limits.scratchTimeoutSeconds; requests above limits.maxScratchTimeoutSeconds require approval/escalation." })),
 		}),
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+			const scratchConfig = await resolveDebateConfig(ctx.cwd, { idea: "scratch" });
+			let timeoutSeconds = params.timeoutSeconds ?? scratchConfig.limits.scratchTimeoutSeconds;
+			if (timeoutSeconds > scratchConfig.limits.maxScratchTimeoutSeconds) {
+				const message = `Scratch command requested ${timeoutSeconds}s, above configured max ${scratchConfig.limits.maxScratchTimeoutSeconds}s.`;
+				if (!ctx.hasUI) throw new Error(`${message} User approval is required before running longer scratch/prototype commands.`);
+				const ok = await ctx.ui.confirm("Long scratch command", `${message}\n\nAllow this one command to proceed?`);
+				if (!ok) throw new Error(`${message} User declined.`);
+			} else {
+				timeoutSeconds = Math.max(1, timeoutSeconds);
+			}
 			const debateDir = resolveMaybe(ctx.cwd, params.debateDir);
 			if (!debateDir.includes(`${path.sep}.pi${path.sep}technical-debates${path.sep}`)) {
 				throw new Error("debateDir must point inside a .pi/technical-debates run directory");
@@ -1578,7 +1735,7 @@ export default function technicalDebate(pi: ExtensionAPI) {
 				const run = await pi.exec("bash", ["-lc", params.command], {
 					cwd: scratchRoot,
 					signal,
-					timeout: (params.timeoutSeconds ?? 20) * 1000,
+					timeout: timeoutSeconds * 1000,
 				});
 				stdout = run.stdout ?? "";
 				stderr = run.stderr ?? "";
@@ -1594,6 +1751,7 @@ export default function technicalDebate(pi: ExtensionAPI) {
 				``,
 				`Expert: ${params.expertName}`,
 				`Directory: ${scratchRoot}`,
+				`Timeout: ${timeoutSeconds}s`,
 				``,
 				`## Files written`,
 				...(writtenFiles.length ? writtenFiles.map((file) => `- ${file}`) : ["- none"]),
@@ -1694,7 +1852,7 @@ export default function technicalDebate(pi: ExtensionAPI) {
 			}
 			const edited = await ctx.ui.editor(
 				"Technical idea for expert panel",
-				"Paste proposal / PRD excerpt / architecture here...\n\nFlags: --workshop --rounds 4 --intensity ruthless --research --subagents --expert-subagents --prototype --html-report --fixed-experts",
+				"Paste proposal / PRD excerpt / architecture here...\n\nFlags: --workshop --profile workshop --rounds 4 --research --subagents --expert-subagents --prototype --html-report --fixed-experts",
 			);
 			idea = edited?.trim() ?? "";
 		}
@@ -1736,15 +1894,44 @@ export default function technicalDebate(pi: ExtensionAPI) {
 		}
 	};
 
+	pi.registerCommand("ideate-config", {
+		description: "Show resolved technical-debate config. Usage: /ideate-config [--profile workshop]",
+		handler: async (args, ctx) => {
+			const parsed = parseDebateCommand(args);
+			const resolved = await resolveDebateConfig(ctx.cwd, { ...parsed, idea: "config preview" });
+			const content = [
+				"# Technical debate config",
+				"",
+				`Config files: ${resolved.configPaths.length ? resolved.configPaths.join(", ") : "built-in defaults only"}`,
+				`Profile: ${resolved.profile ?? "none"}`,
+				"",
+				"## Resolved params",
+				"```json",
+				JSON.stringify(resolved.params, null, 2),
+				"```",
+				"",
+				"## Limits",
+				"```json",
+				JSON.stringify(resolved.limits, null, 2),
+				"```",
+				"",
+				"Config locations checked:",
+				`- ${path.join(os.homedir(), ".pi", "agent", "technical-debate.config.json")}`,
+				`- nearest project .pi/technical-debate.config.json from ${ctx.cwd}`,
+			].join("\n");
+			pi.sendMessage({ customType: "technical-debate", content, display: true, details: resolved });
+		},
+	});
+
 	pi.registerCommand("debate", {
 		description:
-			"Run an adversarial expert panel. Usage: /debate [--workshop] [--rounds 4] [--intensity ruthless] [--research] [--subagents] [--expert-subagents] [--prototype] [--html-report] [--fixed-experts] <idea>",
+			"Run an adversarial expert panel. Usage: /debate [--workshop|--profile workshop] [--rounds 4] [--research] [--subagents] [--expert-subagents] [--prototype] [--html-report] [--fixed-experts] <idea>",
 		handler: async (args, ctx) => runIdeationCommand(args, ctx, "debate"),
 	});
 
 	pi.registerCommand("ideate", {
 		description:
-			"Run a world-class expert ideation panel. Usage: /ideate [--workshop] [--rounds 4] [--intensity ruthless] [--research] [--subagents] [--expert-subagents] [--prototype] [--html-report] [--fixed-experts] <idea>",
+			"Run a world-class expert ideation panel. Usage: /ideate [--workshop|--profile workshop] [--rounds 4] [--research] [--subagents] [--expert-subagents] [--prototype] [--html-report] [--fixed-experts] <idea>",
 		handler: async (args, ctx) => runIdeationCommand(args, ctx, "ideate"),
 	});
 

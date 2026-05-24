@@ -1,0 +1,37 @@
+{
+  "defaults": {
+    "rounds": 4,
+    "research": false,
+    "planExperts": true,
+    "subagents": false,
+    "expertSubagents": false,
+    "prototyping": false,
+    "htmlReport": false,
+    "keepDashboard": false
+  },
+  "profiles": {
+    "workshop": {
+      "research": true,
+      "subagents": true,
+      "expertSubagents": true,
+      "prototyping": true,
+      "htmlReport": true
+    },
+    "safe": {
+      "research": true,
+      "subagents": true,
+      "expertSubagents": false,
+      "prototyping": false,
+      "htmlReport": true
+    }
+  },
+  "models": {
+    "strongModel": "gpt-5.5",
+    "juniorModel": "gpt-5.4-mini"
+  },
+  "limits": {
+    "maxRounds": 8,
+    "scratchTimeoutSeconds": 60,
+    "maxScratchTimeoutSeconds": 300
+  }
+}

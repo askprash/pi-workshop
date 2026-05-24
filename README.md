@@ -6,8 +6,9 @@ Global pi extension for intense technical ideation with world-class expert panel
 
 Registers:
 
-- `/debate [--workshop] [--rounds 4] [--intensity normal|hard|ruthless] [--research] [--subagents] [--expert-subagents] [--prototype] [--html-report] [--fixed-experts] [--keep-dashboard] [--strong-model gpt-5.5] [--junior-model gpt-5.4-mini] <idea>`
-- `/ideate [--workshop] [--rounds 4] [--intensity normal|hard|ruthless] [--research] [--subagents] [--expert-subagents] [--prototype] [--html-report] [--fixed-experts] [--keep-dashboard] [--strong-model gpt-5.5] [--junior-model gpt-5.4-mini] <idea>`
+- `/debate [--workshop|--profile workshop] [--rounds 4] [--research] [--subagents] [--expert-subagents] [--prototype] [--html-report] [--fixed-experts] [--keep-dashboard] [--strong-model gpt-5.5] [--junior-model gpt-5.4-mini] <idea>`
+- `/ideate [--workshop|--profile workshop] [--rounds 4] [--research] [--subagents] [--expert-subagents] [--prototype] [--html-report] [--fixed-experts] [--keep-dashboard] [--strong-model gpt-5.5] [--junior-model gpt-5.4-mini] <idea>`
+- `/ideate-config [--profile workshop]` — show resolved defaults/config/limits
 - `/ideate-hide` — hide the observatory widget
 - `/ideate-sessions` — pick a previous session and show its saved resolution
 - `/ideate-pickup [--rounds 2] [--research] [session-dir or instructions]` — continue from a previous session
@@ -116,7 +117,7 @@ Workshop / RLM-style mode:
 /ideate --workshop <idea>
 ```
 
-`--workshop` is a convenience mode for the extension you described: recursive-style expert delegation, context protection, prototypes, and a readable final report. It enables:
+`--workshop` is shorthand for the configurable `workshop` profile. The built-in profile enables:
 
 - `--research`
 - `--subagents` parent-orchestrated briefs
@@ -124,7 +125,7 @@ Workshop / RLM-style mode:
 - `--prototype` / `debate_scratch`
 - `--html-report`
 
-This is inspired by the RLM pattern: keep the root process as orchestrator, let experts offload bounded subtasks to separate context windows, and preserve a trajectory of child calls / scratch runs as inspectable artifacts rather than stuffing everything into one context.
+You can change what workshop means in config. This is inspired by the RLM pattern: keep the root process as orchestrator, let experts offload bounded subtasks to separate context windows, and preserve a trajectory of child calls / scratch runs as inspectable artifacts rather than stuffing everything into one context.
 
 Model routing:
 
@@ -134,10 +135,50 @@ Model routing:
 
 This requires `pi-subagents` to be installed. Your environment has it installed. `pi-web-access` has also been installed so `researcher` and research-enabled main experts can use `web_search`, `fetch_content`, `get_search_content`, and `code_search`.
 
+## Configuration
+
+Config precedence:
+
+```text
+built-in defaults → ~/.pi/agent/technical-debate.config.json → nearest project .pi/technical-debate.config.json → slash flags / tool params
+```
+
+See `technical-debate.config.example.json` in this extension directory. Minimal example:
+
+```json
+{
+  "defaults": {
+    "rounds": 4,
+    "research": false,
+    "subagents": false,
+    "expertSubagents": false,
+    "prototyping": false,
+    "htmlReport": false
+  },
+  "profiles": {
+    "workshop": {
+      "research": true,
+      "subagents": true,
+      "expertSubagents": true,
+      "prototyping": true,
+      "htmlReport": true
+    }
+  },
+  "limits": {
+    "scratchTimeoutSeconds": 60,
+    "maxScratchTimeoutSeconds": 300
+  }
+}
+```
+
+Use `/ideate-config` to show the resolved config and which files were loaded.
+
+`scratchTimeoutSeconds` is the default timeout for each `debate_scratch` command. Experts may request longer per command with `timeoutSeconds`; requests above `maxScratchTimeoutSeconds` require approval in interactive mode, and fail/escalate when running in non-interactive child expert processes.
+
 ## Usage
 
 ```text
-/ideate --rounds 4 --intensity ruthless --research --subagents My idea is ...
+/ideate --rounds 4 --research --subagents My idea is ...
 ```
 
 Allow direct subagent calls from main experts as well as parent-run briefs:
@@ -173,7 +214,7 @@ Skip panel planning and use the fixed fallback pair:
 or:
 
 ```text
-/debate --rounds 4 --intensity ruthless My idea is ...
+/debate --rounds 4 My idea is ...
 ```
 
 Or ask pi naturally:
@@ -196,7 +237,7 @@ Key files:
 - `round_N_<expert>.md` — expert critiques
 - `round_N_synthesis.md` — per-round synthesis
 - `working-resolution.md` — latest synthesis
-- `workflow.md` — subagent/delegation/prototyping/report policy for this run and each expert's tool list
+- `workflow.md` — config/subagent/delegation/prototyping/report policy for this run and each expert's tool list
 - `scratch/<expert>/...` — prototype code, commands, stdout/stderr captured by `debate_scratch`
 - `resolution.md` — final resolution
 - `report.html` — self-contained evaluation report when `--html-report` or `--workshop` is enabled
