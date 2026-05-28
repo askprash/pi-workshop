@@ -1,0 +1,8 @@
+.pi/
+plans/
+validation/
+progress.md
+worker/
+node_modules/
+*.tgz
+.DS_Store

@@ -8,10 +8,11 @@ import { getMarkdownTheme, truncateHead } from "@earendil-works/pi-coding-agent"
 import { Key, Markdown, Text, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { MAX_ROUNDS, DEFAULT_ROUNDS, DEFAULT_TOOLS, AssistantBriefSchema, ExpertSchema, PublicExpertSchema, WorkshopParams, PublicWorkshopParams, type Intensity, type ResolutionStatus, type ExpertInput, type WorkshopInput, type PublicWorkshopInput } from "./schemas.ts";
-import { resolveWorkshopConfig, validateWorkshopConfig, definedOnly, type WorkshopConfig, type ResolvedWorkshopConfig } from "./config.ts";
-import { SCRATCH_POLICY_FILE, MANIFEST_FILE, writeFileQueued, writeJsonQueued, listFilesRecursive, writeScratchPolicy, readScratchPolicy, writeRunManifest, type ScratchPolicy } from "./artifacts.ts";
+import { resolveWorkshopConfig, definedOnly, type ResolvedWorkshopConfig } from "./config.ts";
+import { safeSegment, expertArtifactSegment, assertUniqueExpertNamesForArtifacts, parsePlannedExperts, selectRequestedProfile } from "./logic.js";
+import { SCRATCH_POLICY_FILE, MANIFEST_FILE, writeFileQueued, listFilesRecursive, writeScratchPolicy, readScratchPolicy, revokeScratchPolicy, validateScratchNonce, ensureDirInsideNoSymlinks, writeScratchFileNoSymlink, writeRunManifest, type ScratchPolicy, type ScratchPolicyHandle } from "./artifacts.ts";
 
-const EXTENSION_VERSION = "0.2.0-safe-beta";
+const EXTENSION_VERSION = "0.2.1-safe-beta";
 const WEB_RESEARCH_TOOLS = "web_search,fetch_content,get_search_content,code_search";
 const PROTOTYPE_TOOL = "workshop_scratch";
 const OUTPUT_CAP_BYTES = 80 * 1024;
@@ -187,19 +188,9 @@ function providerQualifiedIfAvailable(ctx: any, provider: string | undefined, mo
 	}
 }
 
-function safeSegment(text: string): string {
-	return text.toLowerCase().replace(/[^a-z0-9_.-]+/g, "-").replace(/^-|-$/g, "").slice(0, 80) || "item";
-}
-
 function assertInside(parent: string, child: string): void {
 	const rel = path.relative(parent, child);
 	if (rel.startsWith("..") || path.isAbsolute(rel)) throw new Error(`Path escapes allowed directory: ${child}`);
-}
-
-async function assertRealInside(parent: string, child: string): Promise<void> {
-	const realParent = await fs.realpath(parent);
-	const realChild = await fs.realpath(child);
-	assertInside(realParent, realChild);
 }
 
 function isAbortLike(error: unknown): boolean {
@@ -244,6 +235,22 @@ function previewUnknown(value: unknown, max = 800): string | undefined {
 	}
 	text = text.replace(/\s+/g, " ").trim();
 	return text ? text.slice(0, max) : undefined;
+}
+
+function redactSensitiveForAudit(value: unknown, depth = 0): unknown {
+	if (value === undefined || value === null) return value;
+	if (depth > 8) return "[redacted:depth-limit]";
+	if (Array.isArray(value)) return value.map((item) => redactSensitiveForAudit(item, depth + 1));
+	if (typeof value !== "object") return value;
+	const out: Record<string, unknown> = {};
+	for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+		if (/^(nonce|token|api[-_]?key|authorization|password|secret)$/i.test(key) || /(nonce|token|secret|password|api[-_]?key)/i.test(key)) {
+			out[key] = "[REDACTED]";
+		} else {
+			out[key] = redactSensitiveForAudit(child, depth + 1);
+		}
+	}
+	return out;
 }
 
 function firstMeaningfulLine(text: string, max = 220): string {
@@ -494,10 +501,12 @@ async function runChildPi(options: {
 	onActivity?: (text: string) => void;
 	onToolEvent?: (event: ToolAuditEvent) => void;
 }): Promise<ChildRun> {
-	const safeName = options.name.replace(/[^\w.-]+/g, "_");
-	const systemPath = path.join(options.runDir, `_system_${safeName}_${Date.now()}.md`);
-	await writeFileQueued(systemPath, options.systemPrompt);
+	const safeName = expertArtifactSegment({ name: options.name });
+	const systemTempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-workshop-system-"));
+	const systemPath = path.join(systemTempDir, `${safeName}_${Date.now()}.md`);
+	await fs.writeFile(systemPath, options.systemPrompt, { encoding: "utf8", mode: 0o600 });
 
+	try {
 	const args = ["--mode", "json", "-p", "--no-session", "--tools", options.tools ?? DEFAULT_TOOLS];
 	if (options.model) args.push("--model", options.model);
 	args.push("--append-system-prompt", systemPath, options.userPrompt);
@@ -550,8 +559,8 @@ async function runChildPi(options: {
 					eventType,
 					phase: options.phase,
 					round: options.round,
-					argsPreview: previewUnknown(event.input ?? event.args ?? event.arguments ?? event.toolCall?.input ?? event.tool_call?.arguments),
-					resultPreview: previewUnknown(event.result ?? event.output ?? event.content ?? event.message?.content),
+					argsPreview: previewUnknown(redactSensitiveForAudit(event.input ?? event.args ?? event.arguments ?? event.toolCall?.input ?? event.tool_call?.arguments)),
+					resultPreview: previewUnknown(redactSensitiveForAudit(event.result ?? event.output ?? event.content ?? event.message?.content)),
 				};
 				result.toolEvents?.push(audit);
 				options.onToolEvent?.(audit);
@@ -627,6 +636,9 @@ async function runChildPi(options: {
 	if (timedOut) result.stderr += `\nTimed out after ${Math.round((options.timeoutMs ?? 0) / 1000)}s.`;
 	if (!result.text.trim() && result.stderr.trim()) result.text = `[no assistant text]\n\nSTDERR:\n${result.stderr}`;
 	return result;
+	} finally {
+		await fs.rm(systemTempDir, { recursive: true, force: true }).catch((error) => logWarn(`cleanup system prompt temp ${systemTempDir}`, error));
+	}
 }
 
 function intensityRules(intensity: Intensity): string {
@@ -670,6 +682,7 @@ Tool policy:
 - If subagent is explicitly included in available tools, you may delegate only narrow research/verification tasks; you remain responsible for final judgment.
 - If subagent is not in available tools, do not pretend you used it.
 - If workshop_scratch is included, keep generated code/data small and disposable. Cite the scratch artifact paths and important command output in your critique.
+- Never print, cite, copy, or save the scratch nonce. Treat it as a one-run capability secret; cite only generated artifact paths and command output.
 
 Rules:
 - Stay in your authority lane, but name cross-lane risks.
@@ -772,7 +785,6 @@ function buildRoundPrompt(args: {
 	assistantBriefPaths: string[];
 	prototyping: boolean;
 	workshopDir: string;
-	scratchNonce?: string;
 }): string {
 	const context = args.contextPaths.length ? args.contextPaths.map((p) => `- ${p}`).join("\n") : "- (none supplied)";
 	const panel = args.panelExperts.map((e) => `- ${e.name}: ${e.stance}`).join("\n");
@@ -806,7 +818,7 @@ ${args.assistantBriefPaths.length ? args.assistantBriefPaths.map((p) => `- ${p}`
 If assistant briefs are present, read them before finalizing your critique. These subagents were launched by the parent orchestrator before your critique; they are not evidence that you personally called subagents. Treat them as junior research/scouting input, not authority. You own judgment and must correct or ignore weak brief claims.
 
 Scratch/prototype workspace:
-${args.prototyping ? `- Enabled. Use ${PROTOTYPE_TOOL} with workshopDir=${args.workshopDir}, expertName=${args.expertName}, and nonce=${args.scratchNonce ?? "(missing)"}. Cite generated artifact paths and key outputs. This is artifact-contained only, not a security sandbox.` : "- Disabled."}
+${args.prototyping ? `- Enabled. Use ${PROTOTYPE_TOOL} with workshopDir=${args.workshopDir} and expertName=${args.expertName}. The per-expert nonce is provided only in your system prompt; do not print or save it. Cite generated artifact paths and key outputs only. This is artifact-contained only, not a security sandbox.` : "- Disabled."}
 
 Write your answer in the strict format. End with exactly one VERDICT line.`;
 }
@@ -831,6 +843,7 @@ Assistant brief design:
 - Make each task narrow and evidence-seeking. Do not ask juniors to decide the answer.
 - Include exact search targets, source types, code areas, or benchmark families when known.
 - Junior assistants are cheaper/faster models; they gather facts. Main experts own judgment.
+- Do not include privileged fields such as tools or model on experts or assistant briefs. Planner JSON containing tools/model or unknown fields will be rejected.
 
 Always include a scientific/programming/systems implementation expert when the idea involves software. Add domain experts specific to the idea instead of generic skeptics. Add product/user/validation expert only when adoption or evidence is a major risk.
 
@@ -849,40 +862,6 @@ ${contextPaths.length ? contextPaths.map((p) => `- ${p}`).join("\n") : "- none"}
 Return JSON only.`;
 }
 
-function parsePlannedExperts(text: string): ExpertInput[] | null {
-	const jsonText = text.match(/\{[\s\S]*\}/)?.[0];
-	if (!jsonText) return null;
-	try {
-		const parsed = JSON.parse(jsonText) as {
-			experts?: Array<{
-				name?: unknown;
-				stance?: unknown;
-				assistantBriefs?: Array<{ agent?: unknown; task?: unknown; model?: unknown }>;
-			}>;
-		};
-		const experts = (parsed.experts ?? [])
-			.map((e) => ({
-				name: String(e.name ?? "").toLowerCase().replace(/[^a-z0-9.-]+/g, "-").replace(/^-|-$/g, ""),
-				stance: String(e.stance ?? "").trim(),
-				assistantBriefs: Array.isArray(e.assistantBriefs)
-					? e.assistantBriefs
-						.map((b) => ({
-							agent: ["scout", "researcher"].includes(String(b.agent ?? "")) ? (String(b.agent) as any) : "scout",
-							task: String(b.task ?? "").trim(),
-						}))
-						.filter((b) => b.task)
-						.slice(0, 3)
-					: undefined,
-			}))
-			.filter((e) => e.name && e.stance)
-			.slice(0, 4);
-		return experts.length >= 2 ? experts : null;
-	} catch (error) {
-		logWarn("parsePlannedExperts", error);
-		return null;
-	}
-}
-
 async function runExpertAssistantBrief(args: {
 	expert: ExpertInput;
 	round: number;
@@ -899,7 +878,7 @@ async function runExpertAssistantBrief(args: {
 	recordChildRun?: (run: ChildRun) => void;
 	onPanelEvent?: (event: PanelEvent) => void;
 }): Promise<string> {
-	const safeName = args.expert.name.replace(/[^\w.-]+/g, "_");
+	const safeName = expertArtifactSegment(args.expert);
 	const out = path.join(args.workshopDir, `round_${args.round}_${safeName}_assistant_brief.md`);
 	const context = args.contextPaths.length ? args.contextPaths.map((p) => `- ${p}`).join("\n") : "- none supplied";
 	const fallbackBriefs = [
@@ -919,7 +898,7 @@ async function runExpertAssistantBrief(args: {
 	const briefs = args.expert.assistantBriefs?.length ? args.expert.assistantBriefs : fallbackBriefs;
 	let content = `# Assistant brief for ${args.expert.name} (round ${args.round})\n\nJunior model default: ${args.juniorModel}\n`;
 	for (const [i, brief] of briefs.entries()) {
-		const agent = brief.agent ?? "scout";
+		const agent = brief.agent === "researcher" ? "researcher" : "scout";
 		if (agent === "researcher" && !args.webResearch) {
 			content += `\n\n## ${i + 1}. researcher subagent skipped\n\nResearch brief requested by planner, but webResearch was not enabled. Re-run with --web-research --subagents for web-backed research.\n\nTask:\n${brief.task}\n`;
 			continue;
@@ -1226,8 +1205,26 @@ async function runWorkshop(
 	await writeFileQueued(answersPath, "# User answers / rulings\n");
 	throwIfAborted(runSignal);
 
+	let scratchPolicyHandle: ScratchPolicyHandle | undefined;
+	let scratchPolicyForManifest: ScratchPolicy | undefined;
+	let scratchPolicyRevoked = false;
+	const revokeScratchPolicyForRun = async () => {
+		if (!scratchPolicyForManifest || scratchPolicyRevoked) return;
+		try {
+			const revoked = await revokeScratchPolicy(workshopDir);
+			scratchPolicyForManifest = revoked ?? { ...scratchPolicyForManifest, status: "revoked" as const, revokedAt: new Date().toISOString() };
+			scratchPolicyRevoked = true;
+		} catch (error) {
+			const message = `Failed to revoke scratch policy ${workshopDir}: ${String((error as Error)?.message ?? error)}`;
+			logWarn("revoke scratch policy", error);
+			if (!errors.includes(message)) errors.push(message);
+		}
+	};
+
+	try {
 	const allRoundFiles: string[] = [];
 	let experts: ExpertInput[] = params.experts?.length ? params.experts : DEFAULT_EXPERTS;
+	if (params.experts?.length) assertUniqueExpertNamesForArtifacts(params.experts, "User-supplied expert");
 	if (!params.experts?.length && params.planExperts !== false) {
 		onUpdate?.("Planning workshop");
 		onPanelEvent?.({ type: "planner_start" });
@@ -1238,7 +1235,7 @@ async function runWorkshop(
 			userPrompt: buildPlannerPrompt(ideaPath, contextPaths),
 			cwd: baseCwd,
 			model: plannerModel,
-			tools: defaultToolsFor({ webResearch: webResearchEnabled, localBash: localBashEnabled }),
+			tools: defaultToolsFor({ webResearch: webResearchEnabled, localBash: false }),
 			signal: runSignal,
 			timeoutMs: childTimeoutMs,
 			phase: "planner",
@@ -1249,14 +1246,15 @@ async function runWorkshop(
 		recordChildRun(planner);
 		await writeFileQueued(planPath, planner.text);
 		allRoundFiles.push(planPath);
-		const planned = parsePlannedExperts(planner.text);
+		const planned = parsePlannedExperts(planner.text) as ExpertInput[] | null;
 		if (planned) experts = planned;
-		else if (planner.exitCode !== 0 || !planner.text.trim()) {
+		else {
 			degraded = true;
-			errors.push("Planner failed or returned no parseable experts; falling back to fixed experts.");
+			errors.push("Planner returned invalid or rejected expert JSON; falling back to fixed experts.");
 		}
 		onPanelEvent?.({ type: "planner_done", experts: experts.map((e) => e.name), path: planPath });
 	}
+	assertUniqueExpertNamesForArtifacts(experts.slice(0, 4), params.experts?.length ? "User-supplied expert" : "Workshop expert");
 	experts = experts.slice(0, 4).map((expert) => {
 		const tools = resolveExpertTools(expert.tools, {
 			webResearch: webResearchEnabled,
@@ -1270,7 +1268,9 @@ async function runWorkshop(
 			tools,
 		};
 	});
-	const scratchPolicy = prototypingEnabled ? await writeScratchPolicy(workshopDir, experts, resolvedConfig.limits.globalTimeoutSeconds) : undefined;
+	scratchPolicyHandle = prototypingEnabled ? await writeScratchPolicy(workshopDir, experts, resolvedConfig.limits.globalTimeoutSeconds) : undefined;
+	scratchPolicyForManifest = scratchPolicyHandle?.policy;
+	const scratchNonceForExpert = (expert: Pick<ExpertInput, "name">) => scratchPolicyHandle?.noncesByExpert[expertArtifactSegment(expert)];
 	const mainExpertsCanUseSubagents = experts.some((expert) => toolListIncludes(expert.tools, "subagent"));
 	const subagentWorkflow = [
 		`Config files: ${resolvedConfig.configPaths.length ? resolvedConfig.configPaths.join(", ") : "built-in defaults only"}`,
@@ -1278,7 +1278,7 @@ async function runWorkshop(
 		`Scratch timeout: ${resolvedConfig.limits.scratchTimeoutSeconds}s default, ${resolvedConfig.limits.maxScratchTimeoutSeconds}s max before approval/escalation`,
 		`Child timeout: ${resolvedConfig.limits.childTimeoutSeconds}s; global timeout: ${resolvedConfig.limits.globalTimeoutSeconds}s`,
 		`Web research tools: ${webResearchEnabled ? "enabled" : "disabled"}`,
-		`Local bash tools: ${localBashEnabled ? "enabled" : "disabled"}`,
+		`Local bash tools: ${localBashEnabled ? "enabled for main experts only" : "disabled"}`,
 		`Workshop mode (--workshop): ${workshop ? "enabled" : "disabled"}`,
 		`Parent-orchestrated assistant briefs (--subagents): ${parentBriefsEnabled ? "enabled" : "disabled"}`,
 		`Main expert direct subagent tool: ${mainExpertsCanUseSubagents ? "enabled" : "disabled"}`,
@@ -1291,7 +1291,7 @@ async function runWorkshop(
 			? "If an expert calls subagent directly, dashboard activity will show 'MAIN EXPERT called subagent tool' when JSON tool events expose it."
 			: "In the default slash workflow, main experts cannot call subagents; use --expert-subagents/--workshop or explicit expert.tools='...,subagent' to allow that.",
 		prototypingEnabled
-			? `Experts can run throwaway experiments through ${PROTOTYPE_TOOL}; artifacts are under scratch/<expert>/ and included in report.html. Scratch calls require the per-run nonce and are artifact-contained, not sandboxed.`
+			? `Experts can run throwaway experiments through ${PROTOTYPE_TOOL}; artifacts are under scratch/<expert>/ and included in report.html. Scratch calls require a per-expert run nonce; policy is revoked at run end. Scratch is artifact-contained, not sandboxed.`
 			: `Experts cannot run scratch experiments unless --prototype/--workshop or prototyping=true is used.`,
 	];
 	await writeFileQueued(workflowPath, `# Pi workshop workflow\n\n${subagentWorkflow.map((line) => `- ${line}`).join("\n")}\n\n## Expert tools\n\n${experts.map((expert) => `- ${expert.name}: ${expert.tools}`).join("\n")}\n`);
@@ -1341,7 +1341,7 @@ async function runWorkshop(
 				} catch (error) {
 					degraded = true;
 					errors.push(`Assistant brief failed for ${expert.name}: ${String((error as Error)?.message ?? error)}`);
-					const safeName = expert.name.replace(/[^\w.-]+/g, "_");
+					const safeName = expertArtifactSegment(expert);
 					const briefPath = path.join(workshopDir, `round_${round}_${safeName}_assistant_brief_error.md`);
 					await writeFileQueued(briefPath, `# Assistant brief failed for ${expert.name}\n\n${String((error as Error)?.stack ?? error)}\n`);
 					assistantBriefs.set(expert.name, [briefPath]);
@@ -1354,18 +1354,19 @@ async function runWorkshop(
 		const previousCritiques =
 			round > 1
 				? experts
-					.map((e) => path.join(workshopDir, `round_${round - 1}_${e.name.replace(/[^\w.-]+/g, "_")}.md`))
+					.map((e) => path.join(workshopDir, `round_${round - 1}_${expertArtifactSegment(e)}.md`))
 					.filter((p) => fssync.existsSync(p))
 				: [];
 
 		if (round === 1) {
 			await Promise.all(
 				experts.map(async (expert) => {
-					const out = path.join(workshopDir, `round_${round}_${expert.name.replace(/[^\w.-]+/g, "_")}.md`);
+					const out = path.join(workshopDir, `round_${round}_${expertArtifactSegment(expert)}.md`);
 					onPanelEvent?.({ type: "expert_start", round, name: expert.name });
+					const scratchNonce = scratchNonceForExpert(expert);
 					const run = await runChildPi({
 						name: expert.name,
-						systemPrompt: expertSystemPrompt(expert, intensity, expert.tools ?? DEFAULT_TOOLS, parentBriefsEnabled, prototypingEnabled, workshopDir, scratchPolicy?.nonce),
+						systemPrompt: expertSystemPrompt(expert, intensity, expert.tools ?? DEFAULT_TOOLS, parentBriefsEnabled, prototypingEnabled, workshopDir, scratchNonce),
 						userPrompt: buildRoundPrompt({
 							round,
 							maxRounds: rounds,
@@ -1381,7 +1382,6 @@ async function runWorkshop(
 							assistantBriefPaths: assistantBriefs.get(expert.name) ?? [],
 							prototyping: prototypingEnabled,
 							workshopDir,
-							scratchNonce: scratchPolicy?.nonce,
 						}),
 						cwd: baseCwd,
 						model: expert.model,
@@ -1404,11 +1404,12 @@ async function runWorkshop(
 			);
 		} else {
 			for (const expert of experts) {
-				const out = path.join(workshopDir, `round_${round}_${expert.name.replace(/[^\w.-]+/g, "_")}.md`);
+				const out = path.join(workshopDir, `round_${round}_${expertArtifactSegment(expert)}.md`);
 				onPanelEvent?.({ type: "expert_start", round, name: expert.name });
+				const scratchNonce = scratchNonceForExpert(expert);
 				const run = await runChildPi({
 					name: expert.name,
-					systemPrompt: expertSystemPrompt(expert, intensity, expert.tools ?? DEFAULT_TOOLS, parentBriefsEnabled, prototypingEnabled, workshopDir, scratchPolicy?.nonce),
+					systemPrompt: expertSystemPrompt(expert, intensity, expert.tools ?? DEFAULT_TOOLS, parentBriefsEnabled, prototypingEnabled, workshopDir, scratchNonce),
 					userPrompt: buildRoundPrompt({
 						round,
 						maxRounds: rounds,
@@ -1424,7 +1425,6 @@ async function runWorkshop(
 						assistantBriefPaths: assistantBriefs.get(expert.name) ?? [],
 						prototyping: prototypingEnabled,
 						workshopDir,
-						scratchNonce: scratchPolicy?.nonce,
 					}),
 					cwd: baseCwd,
 					model: expert.model,
@@ -1470,7 +1470,7 @@ async function runWorkshop(
 			}),
 			cwd: baseCwd,
 			model: synthModel,
-			tools: defaultToolsFor({ webResearch: webResearchEnabled, localBash: localBashEnabled }),
+			tools: defaultToolsFor({ webResearch: webResearchEnabled, localBash: false }),
 			signal: runSignal,
 			timeoutMs: childTimeoutMs,
 			phase: "synthesis",
@@ -1552,6 +1552,7 @@ async function runWorkshop(
 		});
 	}
 	await scanDownloads("workshop", "final", roundsRun);
+	await revokeScratchPolicyForRun();
 	await writeRunManifest(workshopDir, {
 		extensionVersion: EXTENSION_VERSION,
 		piNodeVersion: process.version,
@@ -1569,7 +1570,7 @@ async function runWorkshop(
 		childRuns,
 		downloadedFiles: downloadAudit.files,
 		errors,
-		scratchPolicy: scratchPolicy ? { path: SCRATCH_POLICY_FILE, allowedExperts: scratchPolicy.allowedExperts, expiresAt: scratchPolicy.expiresAt, artifactContainedNotSandboxed: true } : undefined,
+		scratchPolicy: scratchPolicyForManifest ? { path: SCRATCH_POLICY_FILE, status: scratchPolicyForManifest.status, allowedExperts: scratchPolicyForManifest.allowedExperts.map((expert) => expert.name), expiresAt: scratchPolicyForManifest.expiresAt, revokedAt: scratchPolicyForManifest.revokedAt ?? null, artifactContainedNotSandboxed: true } : undefined,
 		reportPath: reportPath ?? null,
 	});
 	signal?.removeEventListener("abort", onExternalAbort);
@@ -1606,6 +1607,11 @@ async function runWorkshop(
 	};
 	onPanelEvent?.({ type: "final", result });
 	return result;
+	} finally {
+		await revokeScratchPolicyForRun();
+		signal?.removeEventListener("abort", onExternalAbort);
+		stopGlobalTimer();
+	}
 }
 
 type LaneState = { name: string; status: "queued" | "running" | "done"; activity: string[]; path?: string; text?: string };
@@ -2237,12 +2243,72 @@ function sanitizePublicWorkshopParams(params: PublicWorkshopInput): WorkshopInpu
 	}) as WorkshopInput;
 }
 
+async function restrictAssistantContextPaths(ctx: any, params: WorkshopInput): Promise<WorkshopInput> {
+	if (!params.contextPaths?.length) return params;
+	const realCwd = await fs.realpath(ctx.cwd);
+	const contextPaths: string[] = [];
+	for (const contextPath of params.contextPaths) {
+		const resolved = resolveMaybe(ctx.cwd, contextPath);
+		let realContext: string;
+		try {
+			realContext = await fs.realpath(resolved);
+		} catch (error) {
+			throw new Error(`Assistant workshop contextPath must exist and resolve inside the current cwd: ${contextPath} (${String((error as Error)?.message ?? error)})`);
+		}
+		try {
+			assertInside(realCwd, realContext);
+		} catch {
+			throw new Error(`Assistant workshop contextPath must resolve inside the current cwd: ${contextPath}`);
+		}
+		contextPaths.push(realContext);
+	}
+	return { ...params, contextPaths };
+}
+
 function modelExists(ctx: any, ref: string | undefined): boolean {
 	if (!ref) return true;
 	const [provider, ...rest] = ref.split("/");
 	const id = rest.join("/");
 	if (!provider || !id) return true;
 	try { return Boolean(ctx?.modelRegistry?.find?.(provider, id)); } catch (error) { logWarn(`modelExists(${ref})`, error); return false; }
+}
+
+const PROJECT_PRIVILEGED_FLAGS = ["localBash", "expertSubagents", "prototyping"] as const;
+
+type ProjectPrivilegedFlag = typeof PROJECT_PRIVILEGED_FLAGS[number];
+
+function projectPrivilegedDefaults(resolved: ResolvedWorkshopConfig, rawParams: Partial<WorkshopInput>): ProjectPrivilegedFlag[] {
+	const projectConfig = resolved.projectConfig;
+	if (!projectConfig) return [];
+	const explicitProfileOrWorkshop = rawParams.profile !== undefined || rawParams.workshop === true;
+	const projectDefaultProfile = selectRequestedProfile(projectConfig.defaults, {});
+	return PROJECT_PRIVILEGED_FLAGS.filter((flag) => {
+		if ((resolved.params as any)[flag] !== true) return false;
+		if ((rawParams as any)[flag] === true || (rawParams as any)[flag] === false) return false;
+		if (explicitProfileOrWorkshop) return false;
+		const defaultsEnable = (projectConfig.defaults as any)?.[flag] === true;
+		const selectedProfileEnables = resolved.profile ? (projectConfig.profiles?.[resolved.profile] as any)?.[flag] === true : false;
+		const projectSelectedProfile = projectDefaultProfile !== undefined && projectDefaultProfile === resolved.profile;
+		return defaultsEnable || selectedProfileEnables || projectSelectedProfile;
+	});
+}
+
+function projectPrivilegedDefaultsMessage(resolved: ResolvedWorkshopConfig, rawParams: Partial<WorkshopInput>, commandName = "/workshop"): string | undefined {
+	const flags = projectPrivilegedDefaults(resolved, rawParams);
+	if (!flags.length || !resolved.projectConfigPath) return undefined;
+	return [
+		`Project config ${resolved.projectConfigPath} enables privileged workshop mode(s) without explicit per-run flags: ${flags.join(", ")}.`,
+		`Re-run with explicit flags (${flags.map((flag) => flag === "prototyping" ? "--prototype" : flag === "expertSubagents" ? "--expert-subagents" : "--local-bash").join(", ")}) or explicit --no-* flags, or use --profile/--workshop intentionally, to proceed without this project-default confirmation.`,
+		`${commandName} fails closed in non-interactive mode for these project-derived privileges.`,
+	].join("\n");
+}
+
+async function confirmProjectPrivilegedDefaults(ctx: any, resolved: ResolvedWorkshopConfig, rawParams: Partial<WorkshopInput>, commandName = "/workshop"): Promise<string | undefined> {
+	const message = projectPrivilegedDefaultsMessage(resolved, rawParams, commandName);
+	if (!message) return undefined;
+	if (!ctx.hasUI) return message;
+	const ok = await ctx.ui.confirm("Confirm project workshop privileges", `${message}\n\nAllow this run to proceed?`);
+	return ok ? undefined : `${message}\n\nUser declined project-config privileged defaults.`;
 }
 
 async function preflightWorkshop(pi: ExtensionAPI, ctx: any, params: WorkshopInput): Promise<{ ok: boolean; critical: string[]; warnings: string[]; content: string }> {
@@ -2253,6 +2319,13 @@ async function preflightWorkshop(pi: ExtensionAPI, ctx: any, params: WorkshopInp
 	const allTools = new Set((pi.getAllTools?.() ?? []).map((tool: any) => String(tool.name)));
 	const critical: string[] = [];
 	const warnings: string[] = [];
+	try {
+		if (params.experts?.length) assertUniqueExpertNamesForArtifacts(params.experts, "User-supplied expert");
+	} catch (error) {
+		critical.push(String((error as Error)?.message ?? error));
+	}
+	const projectPrivilegeNotice = projectPrivilegedDefaultsMessage(resolved, params);
+	if (projectPrivilegeNotice) warnings.push(projectPrivilegeNotice);
 	for (const tool of DEFAULT_TOOLS.split(",")) if (!allTools.has(tool)) warnings.push(`Built-in read/search tool not visible in parent: ${tool}`);
 	if (webResearch) {
 		for (const tool of WEB_RESEARCH_TOOLS.split(",")) if (!allTools.has(tool)) critical.push(`webResearch requested but tool is unavailable: ${tool}`);
@@ -2275,6 +2348,7 @@ async function preflightWorkshop(pi: ExtensionAPI, ctx: any, params: WorkshopInp
 		`Extension version: ${EXTENSION_VERSION}`,
 		`Profile: ${resolved.profile ?? "none"}`,
 		`Config files: ${resolved.configPaths.length ? resolved.configPaths.join(", ") : "built-in defaults only"}`,
+		`Project config: ${resolved.projectConfigPath ?? "none"}`,
 		`Web research: ${webResearch ? "enabled" : "disabled"}`,
 		`Local bash: ${localBash ? "enabled" : "disabled"}`,
 		`Subagents: ${resolvedParams.subagents ? "parent briefs" : "off"}; expert direct: ${resolvedParams.expertSubagents ? "enabled" : "disabled"}`,
@@ -2305,8 +2379,8 @@ export default function piWorkshop(pi: ExtensionAPI) {
 		name: PROTOTYPE_TOOL,
 		label: "Workshop Scratchpad",
 		description:
-			"Create/run small throwaway prototype experiments for a workshop expert inside an active workshop artifact directory. Requires the per-run nonce from the workshop prompt. This is artifact-contained, not a security sandbox.",
-		promptSnippet: "Run scratch/prototype code experiments for pi-workshop and save outputs as artifacts; requires an active-workshop nonce.",
+			"Create/run small throwaway prototype experiments for a workshop expert inside an active workshop artifact directory. Requires an active, unrevoked per-expert nonce from the workshop prompt. This is artifact-contained, not a security sandbox.",
+		promptSnippet: "Run scratch/prototype code experiments for pi-workshop and save outputs as artifacts; requires an active-workshop per-expert nonce.",
 		promptGuidelines: [
 			"Use workshop_scratch only when workshop prompts provide a workshopDir and nonce; it is artifact-contained, not sandboxed, so keep experiments small and do not use it for project mutations.",
 		],
@@ -2340,14 +2414,9 @@ export default function piWorkshop(pi: ExtensionAPI) {
 				throw new Error("workshopDir must point inside a real .pi/workshops run directory");
 			}
 			const policy = await readScratchPolicy(realWorkshopDir);
-			if (params.nonce !== policy.nonce) throw new Error("Invalid workshop_scratch nonce for this run");
-			if (Date.now() > Date.parse(policy.expiresAt)) throw new Error("Workshop scratch policy has expired");
 			const expertSegment = safeSegment(params.expertName);
-			if (!policy.allowedExperts.includes(expertSegment)) throw new Error(`Expert ${params.expertName} is not allowed by this workshop scratch policy`);
-			const scratchRoot = path.join(realWorkshopDir, "scratch", expertSegment);
-			await fs.mkdir(scratchRoot, { recursive: true });
-			await assertRealInside(realWorkshopDir, scratchRoot);
-			const realScratchRoot = await fs.realpath(scratchRoot);
+			if (!validateScratchNonce(policy, expertSegment, params.nonce)) throw new Error("Invalid workshop_scratch nonce for this expert/run");
+			const realScratchRoot = await ensureDirInsideNoSymlinks(realWorkshopDir, ["scratch", expertSegment]);
 			const writtenFiles: string[] = [];
 			let totalInputBytes = 0;
 			for (const file of params.files ?? []) {
@@ -2355,13 +2424,7 @@ export default function piWorkshop(pi: ExtensionAPI) {
 				if ((params.files?.length ?? 0) > 20) throw new Error("Too many scratch files requested; limit is 20");
 				totalInputBytes += Buffer.byteLength(file.content);
 				if (totalInputBytes > 256 * 1024) throw new Error("Scratch input files exceed 256KB total limit");
-				const target = path.resolve(realScratchRoot, file.path);
-				assertInside(realScratchRoot, target);
-				await fs.mkdir(path.dirname(target), { recursive: true });
-				await assertRealInside(realScratchRoot, path.dirname(target));
-				const existing = await fs.lstat(target).catch(() => undefined);
-				if (existing?.isSymbolicLink()) throw new Error(`Refusing to overwrite symlink scratch file: ${file.path}`);
-				await writeFileQueued(target, file.content);
+				const target = await writeScratchFileNoSymlink(realScratchRoot, file.path, file.content);
 				writtenFiles.push(target);
 			}
 			let stdout = "";
@@ -2387,7 +2450,7 @@ export default function piWorkshop(pi: ExtensionAPI) {
 				}
 			}
 			const label = safeSegment(params.label ?? params.command?.split("\n")[0] ?? "scratch-run");
-			const artifactPath = path.join(realScratchRoot, `${timestampSlug()}-${label}.md`);
+			const artifactFileName = `${timestampSlug()}-${label}.md`;
 			const outTrunc = truncateHead(stdout, { maxBytes: 20 * 1024, maxLines: 500 });
 			const errTrunc = truncateHead(stderr, { maxBytes: 10 * 1024, maxLines: 300 });
 			const artifact = [
@@ -2420,7 +2483,7 @@ export default function piWorkshop(pi: ExtensionAPI) {
 				errTrunc.truncated ? "\n[stderr truncated]" : "",
 				"```",
 			].join("\n");
-			await writeFileQueued(artifactPath, artifact);
+			const artifactPath = await writeScratchFileNoSymlink(realScratchRoot, artifactFileName, artifact);
 			return {
 				content: [{ type: "text", text: `Scratch artifact: ${artifactPath}\nSafety: artifact-contained, not sandboxed.\nExit code: ${code ?? "not run"}\n\nstdout:\n${outTrunc.content || "(empty)"}\n\nstderr:\n${errTrunc.content || "(empty)"}` }],
 				details: { scratchRoot: realScratchRoot, artifactPath, writtenFiles, code, killed, stdoutBytes: Buffer.byteLength(stdout), stderrBytes: Buffer.byteLength(stderr), artifactContainedNotSandboxed: true },
@@ -2445,7 +2508,7 @@ export default function piWorkshop(pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Use workshop when the user asks to ideate, stress-test, grill, or resolve a technical idea with multiple expert viewpoints.",
 			"workshop can improve an idea, conclude it needs iteration, reject it, or declare it too poorly posed to proceed.",
-			"Assistant-invoked workshop is restricted: it may use webResearch and parent-run briefs, but cannot grant bash, direct expert subagents, prototyping, cwd, outputDir, custom tools, or privileged workshop profiles. Tell the user to use /workshop for privileged modes.",
+			"Assistant-invoked workshop is restricted: it may use webResearch and parent-run briefs, and contextPaths only when they resolve inside the current cwd; it cannot grant bash, direct expert subagents, prototyping, cwd, outputDir, custom tools, or privileged workshop profiles. Tell the user to use /workshop for privileged modes.",
 		],
 		parameters: PublicWorkshopParams,
 		prepareArguments(args) {
@@ -2465,7 +2528,7 @@ export default function piWorkshop(pi: ExtensionAPI) {
 			});
 		},
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
-			const safeParams = sanitizePublicWorkshopParams(params as PublicWorkshopInput);
+			const safeParams = await restrictAssistantContextPaths(ctx, sanitizePublicWorkshopParams(params as PublicWorkshopInput));
 			const preflight = await preflightWorkshop(pi, ctx, safeParams);
 			if (!preflight.ok) throw new Error(`workshop preflight failed:\n${preflight.critical.join("\n")}`);
 			const result = await runWorkshop(
@@ -2549,6 +2612,11 @@ export default function piWorkshop(pi: ExtensionAPI) {
 			pi.sendMessage({ customType: "pi-workshop", content: `${preflight.content}\n\n/workshop blocked by critical preflight failures.`, display: true, details: preflight });
 			return;
 		}
+		const projectPrivilegeBlock = await confirmProjectPrivilegedDefaults(ctx, resolvedForUi, params, "/workshop");
+		if (projectPrivilegeBlock) {
+			pi.sendMessage({ customType: "pi-workshop", content: `# Workshop blocked\n\n${projectPrivilegeBlock}`, display: true, details: { projectPrivilegeBlock, resolved: resolvedForUi } });
+			return;
+		}
 		const keepDashboard = Boolean(resolvedForUi.params.keepDashboard);
 		const dashboard = createDashboardState();
 		latestDashboard = dashboard;
@@ -2610,12 +2678,15 @@ export default function piWorkshop(pi: ExtensionAPI) {
 				pi.sendMessage({ customType: "pi-workshop", content: `# ${message}`, display: true, details: { error: message } });
 				return;
 			}
+			const projectPrivilegeNotice = projectPrivilegedDefaultsMessage(resolved, configPreviewParams, "/workshop");
 			const content = [
 				parsed.check ? "# Pi workshop config check" : "# Pi workshop config",
 				"",
 				parsed.check ? "Config validation: **ok**" : "",
 				`Config files: ${resolved.configPaths.length ? resolved.configPaths.join(", ") : "built-in defaults only"}`,
+				`Project config: ${resolved.projectConfigPath ?? "none"}`,
 				`Profile: ${resolved.profile ?? "none"}`,
+				projectPrivilegeNotice ? `Privileged project defaults: ${projectPrivilegeNotice}` : "Privileged project defaults: none requiring confirmation",
 				"",
 				"## Resolved params",
 				"```json",
@@ -2781,6 +2852,11 @@ export default function piWorkshop(pi: ExtensionAPI) {
 			}
 			if (!preflight.ok) {
 				pi.sendMessage({ customType: "pi-workshop", content: `${preflight.content}\n\n/workshop-pickup blocked by critical preflight failures.`, display: true, details: preflight });
+				return;
+			}
+			const projectPrivilegeBlock = await confirmProjectPrivilegedDefaults(ctx, resolvedForUi, pickupParams, "/workshop-pickup");
+			if (projectPrivilegeBlock) {
+				pi.sendMessage({ customType: "pi-workshop", content: `# Workshop pickup blocked\n\n${projectPrivilegeBlock}`, display: true, details: { projectPrivilegeBlock, resolved: resolvedForUi } });
 				return;
 			}
 			const keepDashboard = Boolean(resolvedForUi.params.keepDashboard);

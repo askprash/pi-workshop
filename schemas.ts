@@ -9,7 +9,7 @@ export type Intensity = "normal" | "hard" | "ruthless";
 export type ResolutionStatus = "ACCEPT" | "ITERATE" | "REJECT" | "ILL_POSED" | "UNRESOLVED" | "DEGRADED" | "FAILED" | "CANCELLED";
 
 export const AssistantBriefSchema = Type.Object({
-	agent: Type.Optional(StringEnum(["scout", "researcher", "oracle", "delegate"] as const, { default: "scout" })),
+	agent: Type.Optional(StringEnum(["scout", "researcher"] as const, { default: "scout" })),
 	task: Type.String({ description: "Narrow task for the junior assistant/subagent to investigate for this expert" }),
 	model: Type.Optional(Type.String({ description: "Optional model for this assistant brief" })),
 });
@@ -99,7 +99,7 @@ export const PublicWorkshopParams = Type.Object({
 	profile: Type.Optional(Type.String({ description: "Restricted named config profile. Assistant tool calls may use only safe non-privileged profiles such as 'safe'." })),
 	experts: Type.Optional(Type.Array(PublicExpertSchema, { minItems: 2, maxItems: 4 })),
 	contextPaths: Type.Optional(
-		Type.Array(Type.String(), { description: "Files/directories experts should inspect before making codebase claims" }),
+		Type.Array(Type.String(), { description: "Files/directories experts should inspect before making codebase claims. Assistant tool calls must resolve existing paths inside the current cwd." }),
 	),
 	interactive: Type.Optional(Type.Boolean({ description: "Ask the user to answer blocking open questions between rounds" })),
 	webResearch: Type.Optional(Type.Boolean({ description: "Allow web/doc/code-search tools for experts. Does not grant bash." })),

@@ -3,6 +3,7 @@ import * as fssync from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { MAX_ROUNDS, DEFAULT_ROUNDS, type WorkshopInput } from "./schemas.ts";
+import { selectRequestedProfile } from "./logic.js";
 
 const DEFAULT_SCRATCH_TIMEOUT_SECONDS = 60;
 const DEFAULT_MAX_SCRATCH_TIMEOUT_SECONDS = 300;
@@ -32,6 +33,8 @@ export type ResolvedWorkshopConfig = {
 	params: WorkshopInput & { keepDashboard?: boolean; openObservatory?: boolean };
 	limits: Required<NonNullable<WorkshopConfig["limits"]>>;
 	configPaths: string[];
+	projectConfigPath?: string;
+	projectConfig?: WorkshopConfig;
 	profile?: string;
 };
 
@@ -201,9 +204,16 @@ async function findProjectConfig(cwd: string): Promise<string | undefined> {
 	}
 }
 
+function runtimeDefaults(defaults: WorkshopConfig["defaults"] | undefined): WorkshopConfig["defaults"] {
+	const { profile: _profile, workshop: _workshop, ...rest } = defaults ?? {};
+	return rest;
+}
+
 export async function resolveWorkshopConfig(cwd: string, params: WorkshopInput & { keepDashboard?: boolean; openObservatory?: boolean }): Promise<ResolvedWorkshopConfig> {
 	let config: WorkshopConfig = BUILTIN_CONFIG;
 	const configPaths: string[] = [];
+	let projectConfigPath: string | undefined;
+	let projectConfigForSource: WorkshopConfig | undefined;
 	const globalPath = path.join(os.homedir(), ".pi", "agent", "pi-workshop.config.json");
 	const globalConfig = await readConfigFile(globalPath);
 	if (globalConfig) {
@@ -216,19 +226,23 @@ export async function resolveWorkshopConfig(cwd: string, params: WorkshopInput &
 		if (projectConfig) {
 			config = mergeConfig(config, projectConfig);
 			configPaths.push(projectPath);
+			projectConfigPath = projectPath;
+			projectConfigForSource = projectConfig;
 		}
 	}
-	const requestedProfile = params.workshop ? "workshop" : params.profile;
+	const requestedProfile = selectRequestedProfile(config.defaults, params);
 	if (requestedProfile && !config.profiles?.[requestedProfile]) {
 		throw new Error(`Unknown pi-workshop profile '${requestedProfile}'. Available profiles: ${Object.keys(config.profiles ?? {}).join(", ") || "(none)"}`);
 	}
 	const profileValues = requestedProfile ? (config.profiles?.[requestedProfile] ?? {}) : {};
 	const modelValues = config.models ?? {};
+	const explicitParams = definedOnly(params);
 	const mergedParams = definedOnly({
-		...(config.defaults ?? {}),
+		...(runtimeDefaults(config.defaults) ?? {}),
 		...profileValues,
 		...modelValues,
-		...definedOnly(params),
+		...(params.profile === undefined && requestedProfile ? { profile: requestedProfile } : {}),
+		...explicitParams,
 	}) as WorkshopInput & { keepDashboard?: boolean; openObservatory?: boolean };
 	const maxRounds = Math.max(1, Math.min(MAX_ROUNDS, Number(config.limits?.maxRounds ?? MAX_ROUNDS)));
 	const rounds = Math.max(1, Math.min(maxRounds, Number(mergedParams.rounds ?? DEFAULT_ROUNDS)));
@@ -246,6 +260,8 @@ export async function resolveWorkshopConfig(cwd: string, params: WorkshopInput &
 			globalTimeoutSeconds,
 		},
 		configPaths,
+		projectConfigPath,
+		projectConfig: projectConfigForSource,
 		profile: requestedProfile,
 	};
 }

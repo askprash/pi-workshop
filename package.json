@@ -1,6 +1,6 @@
 {
   "name": "pi-workshop-extension",
-  "version": "0.2.0-safe-beta",
+  "version": "0.2.1-safe-beta",
   "description": "Safe-beta Pi workshop extension for recursive expert ideation with audit artifacts.",
   "keywords": ["pi-package", "pi-extension", "workshop", "agents"],
   "license": "MIT",
@@ -18,6 +18,16 @@
   "pi": {
     "extensions": ["./index.ts"]
   },
+  "files": [
+    "index.ts",
+    "config.ts",
+    "artifacts.ts",
+    "schemas.ts",
+    "logic.js",
+    "pi-workshop.config.example.json",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "test": "node tests/static-tests.mjs",
     "smoke": "pi -e ./index.ts --mode json --no-session -p \"/workshop-config --check\" >/tmp/pi-workshop-smoke.jsonl",

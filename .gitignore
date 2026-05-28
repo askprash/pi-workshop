@@ -1,0 +1,8 @@
+node_modules/
+*.tgz
+.pi/workshops/
+plans/
+validation/
+progress.md
+worker/
+.DS_Store
