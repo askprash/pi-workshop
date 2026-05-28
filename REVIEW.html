@@ -1,0 +1,681 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>pi-workshop · Pre-release Review &amp; Plan</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161a22;
+    --panel-2: #1d2230;
+    --ink: #e6e9ef;
+    --ink-dim: #aab2c0;
+    --ink-faint: #7a8294;
+    --rule: #2a3142;
+    --accent: #7aa2ff;
+    --accent-2: #9cffd4;
+    --warn: #ffd166;
+    --high: #ff6b6b;
+    --med: #ffa552;
+    --low: #ffd166;
+    --ok: #5ad19b;
+    --code-bg: #0b0d12;
+    --tag-bg: #232a3a;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f7f8fb;
+      --panel: #ffffff;
+      --panel-2: #f1f3f8;
+      --ink: #14181f;
+      --ink-dim: #4b5566;
+      --ink-faint: #7a8294;
+      --rule: #e3e7ee;
+      --accent: #2954c9;
+      --accent-2: #1a8a5a;
+      --code-bg: #0b0d12;
+      --tag-bg: #e7ecf5;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink); font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif; line-height: 1.55; font-size: 15px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, pre, .mono { font-family: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, monospace; }
+  code { background: var(--code-bg); color: #d9e1f2; padding: 1px 6px; border-radius: 4px; font-size: 0.88em; }
+  pre { background: var(--code-bg); color: #d9e1f2; padding: 14px 16px; border-radius: 8px; overflow-x: auto; font-size: 12.5px; line-height: 1.5; }
+  pre code { background: transparent; padding: 0; }
+  hr { border: 0; border-top: 1px solid var(--rule); margin: 28px 0; }
+
+  /* layout */
+  .wrap { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 32px; max-width: 1200px; margin: 0 auto; padding: 24px 28px 80px; }
+  nav.toc { position: sticky; top: 24px; align-self: start; max-height: calc(100vh - 48px); overflow-y: auto; font-size: 13.5px; padding-right: 8px; }
+  nav.toc h4 { margin: 0 0 8px; font-size: 11px; letter-spacing: 0.12em; color: var(--ink-faint); text-transform: uppercase; font-weight: 600; }
+  nav.toc ol { list-style: none; padding: 0; margin: 0 0 18px; }
+  nav.toc ol li { margin: 4px 0; }
+  nav.toc ol li a { color: var(--ink-dim); display: block; padding: 2px 0; }
+  nav.toc ol li a:hover { color: var(--ink); }
+  nav.toc ol.sub { padding-left: 12px; border-left: 1px solid var(--rule); margin-left: 4px; }
+  nav.toc ol.sub li a { font-size: 12.5px; color: var(--ink-faint); }
+
+  main { min-width: 0; }
+  header.hero { padding: 32px 28px; background: linear-gradient(180deg, var(--panel) 0%, var(--panel-2) 100%); border: 1px solid var(--rule); border-radius: 14px; margin-bottom: 28px; }
+  header.hero .eyebrow { color: var(--accent); font-size: 12px; letter-spacing: 0.18em; text-transform: uppercase; font-weight: 600; }
+  header.hero h1 { margin: 6px 0 4px; font-size: 30px; letter-spacing: -0.01em; }
+  header.hero .sub { color: var(--ink-dim); font-size: 15px; }
+  header.hero .meta { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 14px; font-size: 12.5px; color: var(--ink-faint); }
+  header.hero .meta span { background: var(--tag-bg); padding: 4px 10px; border-radius: 999px; color: var(--ink-dim); }
+
+  section { background: var(--panel); border: 1px solid var(--rule); border-radius: 12px; padding: 24px 26px; margin-bottom: 22px; }
+  section > h2 { margin: 0 0 4px; font-size: 22px; letter-spacing: -0.005em; }
+  section > .lede { color: var(--ink-dim); margin: 0 0 18px; font-size: 14.5px; }
+  section h3 { margin-top: 28px; margin-bottom: 8px; font-size: 16.5px; }
+  section h4 { margin-top: 18px; margin-bottom: 6px; font-size: 14px; color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }
+  section p { margin: 8px 0; }
+  section ul, section ol { padding-left: 22px; margin: 10px 0; }
+  section li { margin: 4px 0; }
+
+  /* tables */
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13.5px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { background: var(--panel-2); font-weight: 600; font-size: 12.5px; color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.06em; }
+  tr:last-child td { border-bottom: 0; }
+  td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+
+  /* badges */
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11.5px; font-weight: 600; letter-spacing: 0.04em; }
+  .tag.high { background: rgba(255,107,107,0.18); color: var(--high); }
+  .tag.med { background: rgba(255,165,82,0.18); color: var(--med); }
+  .tag.low { background: rgba(255,209,102,0.18); color: var(--low); }
+  .tag.ok { background: rgba(90,209,155,0.18); color: var(--ok); }
+  .tag.info { background: rgba(122,162,255,0.18); color: var(--accent); }
+  .tag.neutral { background: var(--tag-bg); color: var(--ink-dim); }
+
+  /* finding cards */
+  .finding { border: 1px solid var(--rule); border-radius: 10px; padding: 14px 16px; margin: 12px 0; background: var(--panel-2); }
+  .finding .head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+  .finding .head .num { font-family: ui-monospace, Menlo, monospace; font-weight: 600; color: var(--ink-faint); }
+  .finding .head .title { font-weight: 600; font-size: 14.5px; }
+  .finding .body { color: var(--ink-dim); font-size: 13.5px; }
+  .finding .body b { color: var(--ink); }
+  .finding .lines { font-family: ui-monospace, Menlo, monospace; color: var(--accent); font-size: 12px; }
+
+  /* command box */
+  .cmd { display: grid; grid-template-columns: minmax(220px, 1fr) 2fr; gap: 14px; padding: 10px 12px; border-bottom: 1px solid var(--rule); }
+  .cmd:last-child { border-bottom: 0; }
+  .cmd .name { font-family: ui-monospace, Menlo, monospace; color: var(--accent-2); }
+  .cmd .desc { color: var(--ink-dim); font-size: 13.5px; }
+
+  /* flow diagram styles */
+  .diagram-wrap { background: var(--panel-2); border: 1px solid var(--rule); border-radius: 10px; padding: 16px; margin: 14px 0; overflow-x: auto; }
+  .diagram-wrap svg { display: block; margin: 0 auto; max-width: 100%; height: auto; }
+  .diagram-caption { color: var(--ink-faint); font-size: 12.5px; text-align: center; margin-top: 10px; font-style: italic; }
+
+  /* roadmap */
+  .roadmap { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin: 16px 0; }
+  .lane { background: var(--panel-2); border: 1px solid var(--rule); border-radius: 10px; padding: 14px 16px; }
+  .lane h4 { margin: 0 0 6px; font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; }
+  .lane.p0 { border-top: 3px solid var(--high); }
+  .lane.p1 { border-top: 3px solid var(--med); }
+  .lane.p2 { border-top: 3px solid var(--low); }
+  .lane.p3 { border-top: 3px solid var(--ok); }
+  .lane ul { padding-left: 18px; margin: 6px 0; font-size: 13.5px; }
+  .lane li { margin: 5px 0; color: var(--ink); }
+  .lane li small { display: block; color: var(--ink-faint); font-size: 12px; margin-top: 1px; }
+
+  /* file split */
+  .filemap { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin: 14px 0; }
+  .filemap .file { background: var(--code-bg); color: #d9e1f2; border-radius: 8px; padding: 12px 14px; font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; }
+  .filemap .file .fn { color: var(--accent-2); font-weight: 600; }
+  .filemap .file .lines { color: var(--ink-faint); font-size: 11.5px; margin-top: 6px; }
+
+  /* callout */
+  .callout { padding: 14px 16px; border-left: 3px solid var(--accent); background: var(--panel-2); border-radius: 0 8px 8px 0; margin: 16px 0; font-size: 14px; }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.danger { border-left-color: var(--high); }
+  .callout.ok { border-left-color: var(--ok); }
+  .callout strong { color: var(--ink); }
+
+  /* responsive */
+  @media (max-width: 880px) {
+    .wrap { grid-template-columns: 1fr; }
+    nav.toc { position: static; max-height: none; }
+    header.hero h1 { font-size: 24px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+<nav class="toc" aria-label="Contents">
+  <h4>Contents</h4>
+  <ol>
+    <li><a href="#tldr">TL;DR</a></li>
+    <li><a href="#what">1 · What it is</a></li>
+    <li><a href="#flow">2 · How it works</a>
+      <ol class="sub">
+        <li><a href="#flow-diagram">Flow diagram</a></li>
+        <li><a href="#commands">Commands &amp; tools</a></li>
+        <li><a href="#concepts">Key concepts</a></li>
+        <li><a href="#surface">External surface</a></li>
+      </ol>
+    </li>
+    <li><a href="#findings">3 · Findings</a>
+      <ol class="sub">
+        <li><a href="#f-quality">Code quality</a></li>
+        <li><a href="#f-security">Security</a></li>
+        <li><a href="#f-release">Release readiness</a></li>
+      </ol>
+    </li>
+    <li><a href="#plan">4 · Proposed plan</a>
+      <ol class="sub">
+        <li><a href="#plan-p0">P0 · Blockers</a></li>
+        <li><a href="#plan-p1">P1 · Hardening</a></li>
+        <li><a href="#plan-p2">P2 · Polish</a></li>
+        <li><a href="#plan-p3">P3 · Nice-to-have</a></li>
+        <li><a href="#filesplit">Module split</a></li>
+      </ol>
+    </li>
+    <li><a href="#openq">5 · Open questions</a></li>
+  </ol>
+  <h4 style="margin-top:18px">Quick refs</h4>
+  <ol>
+    <li class="mono" style="font-size:12px;color:var(--ink-faint)">index.ts · 3267 lines</li>
+    <li class="mono" style="font-size:12px;color:var(--ink-faint)">v 0.2.0-safe-beta</li>
+    <li class="mono" style="font-size:12px;color:var(--ink-faint)">branch: rlm-workshop</li>
+  </ol>
+</nav>
+
+<main>
+
+<header class="hero">
+  <div class="eyebrow">pi extension review</div>
+  <h1>pi-workshop · pre-release review &amp; plan</h1>
+  <div class="sub">A safe-beta extension that runs recursive expert workshops with audit artifacts — this doc maps how it works and what to clean up before going public.</div>
+  <div class="meta">
+    <span><b style="color:var(--ink)">Path:</b> ~/.pi/agent/extensions/workshop</span>
+    <span><b style="color:var(--ink)">LoC:</b> 3,267 (single file)</span>
+    <span><b style="color:var(--ink)">Tests:</b> regex-only</span>
+    <span><b style="color:var(--ink)">Status:</b> <span class="tag med">safe-beta · not public-ready</span></span>
+  </div>
+</header>
+
+<!-- ============== TL;DR ============== -->
+<section id="tldr">
+  <h2>TL;DR</h2>
+  <p class="lede">A functional, security-conscious extension that needs structural cleanup, real tests, and packaging hygiene before it can ship.</p>
+  <ul>
+    <li><b>Architecture is sound</b> — clean privilege split between the assistant-callable <code>workshop</code> tool and the privileged <code>/workshop</code> slash command, scratch nonce policy, planner-output sanitization, manifest with sha256 artifacts.</li>
+    <li><b>Structural debt</b> — everything lives in one 3,267-line <code>index.ts</code>. Hard to navigate, hard to review, hard to extend. Needs a 6-module split.</li>
+    <li><b>Tests are theatre</b> — <code>tests/static-tests.mjs</code> only greps the source string. Zero behavioral coverage of parsing, planner sanitization, nonce lifecycle, manifest writes, or cancellation.</li>
+    <li><b>Three medium security items</b> — manifest write isn't atomic (race), nonce expiry uses wall-clock (clock-skew exploitable), planner JSON silently drops <code>tools</code>/<code>model</code> instead of rejecting (refactor-fragile).</li>
+    <li><b>Packaging is incomplete</b> — <code>private: true</code>, no LICENSE, peer deps pinned to <code>"*"</code>, default model IDs (<code>gpt-5.5</code>, <code>gpt-5.4-mini</code>) look like placeholders, no CHANGELOG, no CI.</li>
+    <li><b>Estimated effort to ship</b>: ~3 working days for P0+P1 (blockers + hardening), ~1 more day for polish.</li>
+  </ul>
+</section>
+
+<!-- ============== WHAT ============== -->
+<section id="what">
+  <h2>1 · What this extension is</h2>
+  <p class="lede">A pi-agent extension that orchestrates a "workshop" — multiple expert personas critique an idea over N rounds, a synthesizer convergence-checks each round, and everything is captured as audit artifacts.</p>
+
+  <h3>The mental model</h3>
+  <p>You give it an idea. It plans 2&ndash;4 expert personas (or you specify them), runs each as a child <code>pi</code> process with read-only tools by default, synthesizes their critiques into a working resolution, and repeats for up to N rounds until <code>CONVERGED: YES</code>. Every artifact (prompts, critiques, synthesis, manifest with sha256 hashes) is written under <code>.pi/workshops/&lt;timestamp-slug&gt;/</code>.</p>
+
+  <h3>The privilege model (the interesting bit)</h3>
+  <p>Two entry points with intentionally different power:</p>
+  <ul>
+    <li><b>Slash commands</b> (<code>/workshop</code>, <code>/workshop-doctor</code>, &hellip;) — the user is in the loop, so privileged modes (<code>--local-bash</code>, <code>--expert-subagents</code>, <code>--prototype</code>) are available.</li>
+    <li><b>Assistant tool</b> (<code>workshop</code>) — invoked by the LLM, so the schema is narrowed (<code>PublicWorkshopParams</code>) to strip <code>cwd</code>, <code>outputDir</code>, <code>localBash</code>, <code>expertSubagents</code>, <code>prototyping</code>, privileged profiles, and per-expert <code>tools</code>/<code>model</code>.</li>
+  </ul>
+  <p>The <code>workshop_scratch</code> tool — exposed only when <code>--prototype</code> is on — is gated by a per-run <b>nonce policy file</b> with an expert allowlist and TTL, but bash inside it runs as the local user. The README is explicit: <i>artifact-contained, not sandboxed</i>.</p>
+</section>
+
+<!-- ============== FLOW ============== -->
+<section id="flow">
+  <h2>2 · How it works</h2>
+  <p class="lede">A single <code>/workshop</code> invocation walks through 10 stages, spawning child <code>pi</code> processes for planner, experts, and synthesizer.</p>
+
+  <h3 id="flow-diagram">Run-time flow of <code>/workshop</code></h3>
+  <div class="diagram-wrap">
+    <svg viewBox="0 0 920 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="/workshop control flow diagram">
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#7aa2ff"/>
+        </marker>
+        <marker id="arrowDim" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#7a8294"/>
+        </marker>
+        <style>
+          .b { fill: #1d2230; stroke: #2a3142; stroke-width: 1.4; rx: 8; }
+          .b.priv { stroke: #ffa552; }
+          .b.io { fill: #0b0d12; stroke: #2a3142; }
+          .b.loop { fill: transparent; stroke: #7aa2ff; stroke-dasharray: 6 5; }
+          .lbl { fill: #e6e9ef; font: 600 13px ui-sans-serif, system-ui, sans-serif; }
+          .sub { fill: #aab2c0; font: 11px ui-monospace, Menlo, monospace; }
+          .tag { fill: #7aa2ff; font: 10.5px ui-monospace, Menlo, monospace; }
+          .arr { stroke: #7aa2ff; stroke-width: 1.6; fill: none; }
+          .arr.dim { stroke: #7a8294; stroke-dasharray: 5 4; }
+        </style>
+      </defs>
+
+      <!-- 1 parse -->
+      <rect class="b" x="40" y="20" width="220" height="58"/>
+      <text class="lbl" x="60" y="44">1 · Parse &amp; validate flags</text>
+      <text class="sub" x="60" y="62">parseWorkshopCommand() · L3082</text>
+
+      <!-- 2 config -->
+      <rect class="b" x="40" y="100" width="220" height="58"/>
+      <text class="lbl" x="60" y="124">2 · Resolve config</text>
+      <text class="sub" x="60" y="142">global → project → profile → CLI · L1578</text>
+
+      <!-- 3 plan -->
+      <rect class="b priv" x="40" y="180" width="220" height="58"/>
+      <text class="lbl" x="60" y="204">3 · Planner (child pi)</text>
+      <text class="sub" x="60" y="222">runChildPi(planner) · L1674</text>
+
+      <!-- 4 setup -->
+      <rect class="b" x="40" y="260" width="220" height="58"/>
+      <text class="lbl" x="60" y="284">4 · Setup run dir + nonce</text>
+      <text class="sub" x="60" y="302">.pi/workshops/&lt;slug&gt;/ · L1647</text>
+
+      <!-- 5 briefs (parent) -->
+      <rect class="b priv" x="40" y="345" width="220" height="58"/>
+      <text class="lbl" x="60" y="369">5 · Subagent briefs (parent)</text>
+      <text class="sub" x="60" y="387">scout / researcher · L1756</text>
+
+      <!-- LOOP wrapper -->
+      <rect class="b loop" x="290" y="335" width="370" height="280" rx="10"/>
+      <text class="tag" x="300" y="354">while round ≤ N · break on converged | abort | maxRounds</text>
+
+      <!-- 6 experts -->
+      <rect class="b priv" x="310" y="370" width="330" height="74"/>
+      <text class="lbl" x="328" y="395">6 · Run experts (parallel R1, serial R&gt;1)</text>
+      <text class="sub" x="328" y="413">runChildPi(expert) × N · L1753–1886</text>
+      <text class="sub" x="328" y="430">tools: read,grep,find,ls ± web ± bash ± scratch</text>
+
+      <!-- 7 synth -->
+      <rect class="b priv" x="310" y="460" width="330" height="58"/>
+      <text class="lbl" x="328" y="484">7 · Synthesizer</text>
+      <text class="sub" x="328" y="502">parse STATUS + CONVERGED · L1898–1932</text>
+
+      <!-- 8 interactive -->
+      <rect class="b" x="310" y="535" width="330" height="58"/>
+      <text class="lbl" x="328" y="559">8 · Interactive questions (if any)</text>
+      <text class="sub" x="328" y="577">pause global timer · L1944</text>
+
+      <!-- 9 finalize -->
+      <rect class="b" x="690" y="370" width="210" height="58"/>
+      <text class="lbl" x="710" y="394">9 · Scan downloads</text>
+      <text class="sub" x="710" y="412">snapshotDownloads · L2009</text>
+
+      <!-- 10 manifest -->
+      <rect class="b" x="690" y="450" width="210" height="58"/>
+      <text class="lbl" x="710" y="474">10 · Write manifest.json</text>
+      <text class="sub" x="710" y="492">writeRunManifest · L1558</text>
+
+      <!-- output: artifacts -->
+      <rect class="b io" x="690" y="530" width="210" height="86"/>
+      <text class="lbl" x="710" y="554" fill="#9cffd4">Artifacts</text>
+      <text class="sub" x="710" y="572">idea · workflow · rounds</text>
+      <text class="sub" x="710" y="588">synthesis · resolution</text>
+      <text class="sub" x="710" y="604">manifest · transcript · html</text>
+
+      <!-- arrows -->
+      <path class="arr" d="M150 78 L150 100" marker-end="url(#arrow)"/>
+      <path class="arr" d="M150 158 L150 180" marker-end="url(#arrow)"/>
+      <path class="arr" d="M150 238 L150 260" marker-end="url(#arrow)"/>
+      <path class="arr" d="M150 318 L150 345" marker-end="url(#arrow)"/>
+      <path class="arr" d="M260 374 L310 374" marker-end="url(#arrow)"/>
+      <path class="arr" d="M475 444 L475 460" marker-end="url(#arrow)"/>
+      <path class="arr" d="M475 518 L475 535" marker-end="url(#arrow)"/>
+      <!-- loop back -->
+      <path class="arr dim" d="M640 593 C 685 593, 690 470, 660 470" marker-end="url(#arrowDim)"/>
+      <text class="tag" x="660" y="610" fill="#7a8294">round + 1</text>
+      <!-- exit to finalize -->
+      <path class="arr" d="M640 489 L690 399" marker-end="url(#arrow)"/>
+      <path class="arr" d="M795 428 L795 450" marker-end="url(#arrow)"/>
+      <path class="arr" d="M795 508 L795 530" marker-end="url(#arrow)"/>
+
+      <!-- legend -->
+      <rect class="b" x="40" y="640" width="14" height="14"/>
+      <text class="sub" x="60" y="652" fill="#aab2c0">step in parent process</text>
+      <rect class="b priv" x="220" y="640" width="14" height="14"/>
+      <text class="sub" x="240" y="652" fill="#aab2c0">spawns child pi process</text>
+      <rect class="b loop" x="430" y="640" width="14" height="14"/>
+      <text class="sub" x="450" y="652" fill="#aab2c0">loop body</text>
+      <rect class="b io" x="540" y="640" width="14" height="14"/>
+      <text class="sub" x="560" y="652" fill="#aab2c0">output</text>
+    </svg>
+    <div class="diagram-caption">Steps 1–4 set up. Steps 5–8 run inside a bounded round loop. Steps 9–10 finalize and emit artifacts.</div>
+  </div>
+
+  <h3 id="commands">Commands &amp; tools</h3>
+  <div>
+    <div class="cmd"><div class="name">/workshop &lt;idea&gt;</div><div class="desc">Main entry. Flags: <code>--profile</code>, <code>--rounds</code>, <code>--web-research</code>, <code>--local-bash</code>, <code>--subagents</code>, <code>--expert-subagents</code>, <code>--prototype</code>, <code>--html-report</code>, <code>--observatory</code>. <span class="tag info">L3079</span></div></div>
+    <div class="cmd"><div class="name">/workshop-config [--check]</div><div class="desc">Display + validate resolved config hierarchy. <span class="tag info">L3033</span></div></div>
+    <div class="cmd"><div class="name">/workshop-doctor</div><div class="desc">Preflight: tool availability, model existence, config validity, artifact-dir perms. <span class="tag info">L3097</span></div></div>
+    <div class="cmd"><div class="name">/workshop-cancel</div><div class="desc">Abort active workshop; write <code>CANCELLED</code> artifacts. <span class="tag info">L3085</span></div></div>
+    <div class="cmd"><div class="name">/workshop-observatory</div><div class="desc">Open TUI inspector (Ctrl+Alt+W) over experts/subagents/tool-events/downloads. <span class="tag info">L3126</span></div></div>
+    <div class="cmd"><div class="name">/workshop-hide</div><div class="desc">Hide the persistent observatory widget. <span class="tag info">L3118</span></div></div>
+    <div class="cmd"><div class="name">/workshop-sessions</div><div class="desc">Browse past <code>.pi/workshops/</code> sessions. <span class="tag info">L3136</span></div></div>
+    <div class="cmd"><div class="name">/workshop-pickup</div><div class="desc">Linked continuation from a prior session. <span class="tag info">L3160</span></div></div>
+    <div class="cmd"><div class="name">tool: workshop</div><div class="desc">LLM-callable; <b>restricted public schema</b>. No <code>cwd</code>/<code>outputDir</code>/<code>localBash</code>/<code>expertSubagents</code>/<code>prototyping</code>; only <code>safe</code> profile. <span class="tag info">L2879</span></div></div>
+    <div class="cmd"><div class="name">tool: workshop_scratch</div><div class="desc">Expert-only prototype writes under <code>scratch/&lt;expert&gt;/</code>; nonce-gated; <b>artifact-contained, not sandboxed</b>. <span class="tag info">L2744</span></div></div>
+  </div>
+
+  <h3 id="concepts">Key concepts</h3>
+  <table>
+    <thead><tr><th>Concept</th><th>What it is</th></tr></thead>
+    <tbody>
+      <tr><td>Profile</td><td>Named config preset (built-ins: <code>safe</code>, <code>workshop</code>). Sets the flags-as-a-bundle for web/bash/subagents/prototype/html.</td></tr>
+      <tr><td>Parent-orchestrated subagents</td><td><code>--subagents</code>: parent runs bounded <code>scout</code>/<code>researcher</code> briefs, passes results as context. <b>Default off.</b></td></tr>
+      <tr><td>Expert subagents</td><td><code>--expert-subagents</code>: experts can call <code>subagent</code> tool directly. Privileged; off by default.</td></tr>
+      <tr><td>Scratch policy nonce</td><td>UUID generated per run, written to <code>.scratch-policy.json</code> with TTL + expert allowlist. <code>workshop_scratch</code> calls must present a matching nonce.</td></tr>
+      <tr><td>Observatory widget vs inspector</td><td>Widget = persistent TUI dashboard during run. Inspector = modal navigator over <code>DashboardState</code>, opens with Ctrl+Alt+W.</td></tr>
+      <tr><td>Run manifest</td><td><code>manifest.json</code> with params, models, exit codes, tool events, downloads, sha256 of each artifact.</td></tr>
+      <tr><td>Config precedence</td><td><code>built-in defaults → ~/.pi/agent/pi-workshop.config.json → project .pi/pi-workshop.config.json → slash flags</code>.</td></tr>
+      <tr><td>Resolution status</td><td><code>ACCEPT</code>·<code>ITERATE</code>·<code>REJECT</code>·<code>ILL_POSED</code>·<code>UNRESOLVED</code>·<code>DEGRADED</code>·<code>FAILED</code>·<code>CANCELLED</code>.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 id="surface">External surface area</h3>
+  <ul>
+    <li><b>Pi SDK imports</b>: <code>@earendil-works/pi-ai</code> (StringEnum), <code>@earendil-works/pi-coding-agent</code> (ExtensionAPI, exec, pi.registerCommand/Tool/Shortcut), <code>@earendil-works/pi-tui</code> (Markdown, Text, Key, matchesKey), <code>typebox</code>.</li>
+    <li><b>Node</b>: <code>child_process.spawn</code> with <code>detached: true</code> for planner/experts/synth; <code>fs/promises</code>; <code>crypto.randomUUID</code> for nonce; <code>crypto.createHash</code> for manifest sha256.</li>
+    <li><b>Filesystem</b>: writes under <code>.pi/workshops/&lt;slug&gt;/</code>; reads <code>~/.pi/agent/pi-workshop.config.json</code> and project <code>.pi/pi-workshop.config.json</code>; <b>scans <code>~/Downloads</code></b> to detect new files during a run (privacy implication).</li>
+  </ul>
+</section>
+
+<!-- ============== FINDINGS ============== -->
+<section id="findings">
+  <h2>3 · Findings</h2>
+  <p class="lede">Concrete issues from four parallel reviews — architecture, code quality, security, release readiness. Each item is line-anchored in <code>index.ts</code>.</p>
+
+  <!-- CODE QUALITY -->
+  <h3 id="f-quality">3.1 · Code quality <span class="tag neutral" style="margin-left:8px">structural debt</span></h3>
+
+  <div class="finding">
+    <div class="head"><span class="num">CQ-1</span><span class="title">Single 3,267-line file</span><span class="tag high">HIGH</span></div>
+    <div class="body">Schemas, planner, expert runner, scratch tool, observatory UI, CLI parser, manifest writer all live in <code>index.ts</code>. Hard to review, hard to test, hard to onboard contributors. <a href="#filesplit">Proposed split below.</a></div>
+  </div>
+
+  <div class="finding">
+    <div class="head"><span class="num">CQ-2</span><span class="title">Placeholder-looking model IDs</span><span class="tag high">HIGH</span></div>
+    <div class="body"><code>DEFAULT_STRONG_MODEL = "gpt-5.5"</code> and <code>DEFAULT_JUNIOR_MODEL = "gpt-5.4-mini"</code> at <span class="lines">L26–27</span>, mirrored into <code>pi-workshop.config.example.json:34–35</code>. These don't correspond to any released model family. Either real IDs the user must override, or placeholders that need replacing before public release.</div>
+  </div>
+
+  <div class="finding">
+    <div class="head"><span class="num">CQ-3</span><span class="title">Legacy <code>--research</code> alias still mutates two fields</span><span class="tag med">MED</span></div>
+    <div class="body">At <span class="lines">L2629–2630, L536–539, L2901–2902</span> the deprecated <code>--research</code> flag sets <i>both</i> <code>webResearch</code> and a separate <code>research</code> field, and the fallback (<code>webResearch || research</code>) is duplicated across the slash parser and the tool's <code>prepareArguments</code>. Pick one: collapse <code>research</code> into <code>webResearch</code> at parse time, or remove the alias.</div>
+  </div>
+
+  <div class="finding">
+    <div class="head"><span class="num">CQ-4</span><span class="title">Type leaks &mdash; nine <code>any</code> contexts/themes</span><span class="tag med">MED</span></div>
+    <div class="body"><span class="lines">L364, L370, L374, L396, L626, L2233, L2243, L2324, L2327</span> pass context/theme typed as <code>any</code>. Extract real types from <code>pi-tui</code>/<code>pi-coding-agent</code>. Also <code>(parsed as any)[name]</code> at <span class="lines">L2592</span> and <code>JSON.parse(&hellip;) as ScratchPolicy</code> at <span class="lines">L1538</span> bypass type checks before validation.</div>
+  </div>
+
+  <div class="finding">
+    <div class="head"><span class="num">CQ-5</span><span class="title">Swallowed errors in child-process &amp; FS paths</span><span class="tag med">MED</span></div>
+    <div class="body">Empty catches at <span class="lines">L764</span> (force-kill), <span class="lines">L822, L932</span> (child JSON event parse), <span class="lines">L1273</span>; silent <code>.catch(() =&gt; return)</code> at <span class="lines">L614</span> (<code>listFilesRecursive</code>); <code>modelExists()</code> at <span class="lines">L2685</span> <i>returns true</i> on exception (fail-open). Each should at minimum log to stderr / observatory.</div>
+  </div>
+
+  <div class="finding">
+    <div class="head"><span class="num">CQ-6</span><span class="title">Duplicated literals: tool lists, timeouts</span><span class="tag low">LOW</span></div>
+    <div class="body"><code>WEB_RESEARCH_TOOLS.split(",")</code> at <span class="lines">L349, L350, L696, L2698, L2730</span>; magic <code>20</code>-file and <code>256KB</code> scratch limits at <span class="lines">L2795, L2797</span>. Extract named constants.</div>
+  </div>
+
+  <div class="finding">
+    <div class="head"><span class="num">CQ-7</span><span class="title">Tests don't test behavior</span><span class="tag high">HIGH</span></div>
+    <div class="body"><code>tests/static-tests.mjs</code> asserts that certain <i>strings</i> appear in <code>index.ts</code>. A rename or refactor silently breaks it, and broken logic with the right strings still passes. Missing real coverage: slash flag parsing, planner sanitization, scratch nonce lifecycle, config merge precedence, manifest schema, cancellation propagation.</div>
+  </div>
+
+  <!-- SECURITY -->
+  <h3 id="f-security">3.2 · Security <span class="tag neutral" style="margin-left:8px">3 med · 5 low</span></h3>
+
+  <div class="finding">
+    <div class="head"><span class="num">SEC-1</span><span class="title">Manifest write is non-atomic</span><span class="tag med">MED</span></div>
+    <div class="body"><span class="lines">L1558–1565</span> <code>writeRunManifest()</code> writes the manifest twice (empty artifacts, then with). A concurrent reader or a crash between writes leaves an inconsistent manifest on disk. <b>Fix</b>: write to <code>.manifest.tmp</code> + atomic rename.</div>
+  </div>
+
+  <div class="finding">
+    <div class="head"><span class="num">SEC-2</span><span class="title">Nonce expiry uses wall clock</span><span class="tag med">MED</span></div>
+    <div class="body"><span class="lines">L1527–1529, L2783–2784</span>: TTL computed as <code>Date.now() + ttl</code>, checked via <code>Date.parse(expiresAt)</code>. System-clock rollback (or NTP adjustment, or untrusted config-supplied TTL) shifts the validity window. <b>Fix</b>: store an absolute mono-clock baseline or refuse to evaluate if clock skew is detected.</div>
+  </div>
+
+  <div class="finding">
+    <div class="head"><span class="num">SEC-3</span><span class="title">Planner JSON silently drops <code>tools</code>/<code>model</code></span><span class="tag med">MED</span></div>
+    <div class="body"><span class="lines">L1249–1276, L1691–1710</span>: README claims planner JSON "cannot smuggle <code>tools</code> or <code>model</code>", and today it can't — those fields are <i>ignored</i> rather than rejected. A future refactor that accesses <code>planned.tools</code> reintroduces the hole. <b>Fix</b>: reject planner output containing those fields with a clear error, not silent drop.</div>
+  </div>
+
+  <div class="finding">
+    <div class="head"><span class="num">SEC-4</span><span class="title">Scratch policy file isn't symlink-checked on read</span><span class="tag low">LOW</span></div>
+    <div class="body"><span class="lines">L1537–1542</span> <code>readScratchPolicy()</code> reads <code>.scratch-policy.json</code> directly. A symlink swap could substitute an older policy with a stale nonce/allowlist. <b>Fix</b>: <code>fs.realpath</code> + assert it's still under the workshop dir.</div>
+  </div>
+
+  <div class="finding">
+    <div class="head"><span class="num">SEC-5</span><span class="title">Detached children can spawn descendants outside the group</span><span class="tag low">LOW</span></div>
+    <div class="body"><span class="lines">L762, L797, L916</span>: spawns use <code>detached: true</code>; cancel sends <code>SIGTERM</code> to <code>-pid</code>. A child that re-detaches escapes the group. <b>Fix</b>: track descendants explicitly or avoid <code>detached</code>.</div>
+  </div>
+
+  <div class="finding">
+    <div class="head"><span class="num">SEC-6</span><span class="title">Downloads scan leaks filenames into manifest</span><span class="tag low">LOW</span></div>
+    <div class="body"><span class="lines">L695–708, L2009</span>: every non-hidden file landing in <code>~/Downloads</code> during a run gets logged in the audit manifest. If the manifest is committed/shared, private filenames leak. <b>Fix</b>: opt-in flag, or filter to files written by child processes.</div>
+  </div>
+
+  <div class="finding">
+    <div class="head"><span class="num">SEC-7</span><span class="title"><code>/workshop-cancel</code> doesn't await cleanup</span><span class="tag low">LOW</span></div>
+    <div class="body"><span class="lines">L3092–3093</span>: <code>controller.abort()</code> returns immediately. Pending manifest write / scratch-policy cleanup may be interrupted. <b>Fix</b>: await a cleanup promise; write a <code>CANCELLED</code> sentinel synchronously.</div>
+  </div>
+
+  <div class="finding">
+    <div class="head"><span class="num">SEC-8</span><span class="title">Mixed expert-name sanitization paths</span><span class="tag low">LOW</span></div>
+    <div class="body"><span class="lines">L568 (<code>safeSegment</code>), L1258, L1803</span>: three different regexes "sanitize" expert names in different contexts. Today they all defeat traversal, but the inconsistency is a refactor footgun. <b>Fix</b>: route every path-forming use through <code>safeSegment</code>.</div>
+  </div>
+
+  <!-- RELEASE READINESS -->
+  <h3 id="f-release">3.3 · Release readiness <span class="tag neutral" style="margin-left:8px">packaging, docs, CI</span></h3>
+
+  <div class="finding">
+    <div class="head"><span class="num">REL-1</span><span class="title">Packaging is private-mode</span><span class="tag high">HIGH</span></div>
+    <div class="body"><code>package.json</code>: <code>"private": true</code>, no <code>license</code>, no <code>repository</code>, no <code>bugs</code>, no <code>homepage</code>, no <code>author</code>, no <code>LICENSE</code> file at repo root. Peer deps are all <code>"*"</code> &mdash; npm will accept any version. Decide on scope (<code>@earendil-works/pi-workshop</code>?), pin peer ranges, add license + repo metadata.</div>
+  </div>
+
+  <div class="finding">
+    <div class="head"><span class="num">REL-2</span><span class="title">No CI, no lint, no typecheck</span><span class="tag high">HIGH</span></div>
+    <div class="body">No <code>.github/workflows/</code>, no <code>tsconfig.json</code>, no ESLint/Biome, no Prettier. TypeScript is written but never strict-checked. For a TS package going public, at minimum: <code>tsc --noEmit</code>, lint, formatter, smoke-test in GH Actions on PR.</div>
+  </div>
+
+  <div class="finding">
+    <div class="head"><span class="num">REL-3</span><span class="title">README missing install + quick-start + model setup</span><span class="tag med">MED</span></div>
+    <div class="body">No <code>pi install</code> instructions, no minimal end-to-end example, no clarification of what to do if the default models (<code>gpt-5.5</code>/<code>gpt-5.4-mini</code>) aren't reachable. No troubleshooting / uninstall / CHANGELOG. No screenshots of the observatory.</div>
+  </div>
+
+  <div class="finding">
+    <div class="head"><span class="num">REL-4</span><span class="title">No behavioral tests</span><span class="tag high">HIGH</span></div>
+    <div class="body">Already called out as CQ-7. Re-flagged here because shipping without behavioral tests is the single largest release risk. At minimum: slash-flag parser, config merge, planner sanitization, scratch nonce expiry/symlink, manifest schema, cancellation.</div>
+  </div>
+
+  <div class="finding">
+    <div class="head"><span class="num">REL-5</span><span class="title">No platform statement; code is POSIX-only</span><span class="tag med">MED</span></div>
+    <div class="body"><code>process.kill(-pid)</code>, <code>~/Downloads</code>, path separators &mdash; works on macOS/Linux, will fail on Windows. README should either explicitly say "macOS/Linux only" or add a Windows compatibility shim.</div>
+  </div>
+
+  <div class="finding">
+    <div class="head"><span class="num">REL-6</span><span class="title">Stability / versioning story is informal</span><span class="tag low">LOW</span></div>
+    <div class="body"><code>"safe-beta"</code> in the version isn't documented. Manifest carries <code>version: 1</code> but the schema isn't documented. Slash flags aren't declared stable or experimental. Add a short stability statement to README and a manifest schema reference.</div>
+  </div>
+
+  <div class="finding">
+    <div class="head"><span class="num">REL-7</span><span class="title">No privacy statement</span><span class="tag low">LOW</span></div>
+    <div class="body">No telemetry calls detected in the source — good. README should explicitly say so ("no telemetry, no external calls beyond user-configured model APIs and explicit <code>--web-research</code> tools").</div>
+  </div>
+</section>
+
+<!-- ============== PLAN ============== -->
+<section id="plan">
+  <h2>4 · Proposed plan</h2>
+  <p class="lede">Four lanes ordered by what unblocks public release. P0 is required, P1 is recommended-before-launch, P2/P3 can ship in a follow-up.</p>
+
+  <div class="roadmap">
+    <div class="lane p0" id="plan-p0">
+      <h4>P0 · ship-blockers</h4>
+      <ul>
+        <li><b>Replace placeholder models</b><small>CQ-2 · audit <code>gpt-5.5</code>/<code>gpt-5.4-mini</code>, switch to real defaults or unset them and require explicit config</small></li>
+        <li><b>Fix packaging metadata</b><small>REL-1 · flip <code>private</code>, add <code>license</code>, <code>repository</code>, <code>bugs</code>, <code>author</code>; LICENSE file; pin peer-dep ranges</small></li>
+        <li><b>Atomic manifest write</b><small>SEC-1 · tmp + rename to remove race</small></li>
+        <li><b>Reject (don't drop) <code>tools</code>/<code>model</code> in planner JSON</b><small>SEC-3 · close the refactor-fragile case</small></li>
+        <li><b>Behavioral tests for the 6 hot paths</b><small>CQ-7 / REL-4 · slash parser · config merge · planner sanitize · scratch nonce · manifest schema · cancellation</small></li>
+        <li><b>Minimum CI</b><small>REL-2 · <code>tsc --noEmit</code> + tests + smoke on PR</small></li>
+      </ul>
+    </div>
+
+    <div class="lane p1" id="plan-p1">
+      <h4>P1 · hardening</h4>
+      <ul>
+        <li><b>Module split</b><small>CQ-1 · see file map below; cut <code>index.ts</code> to a thin entry point</small></li>
+        <li><b>tsconfig strict + lint + formatter</b><small>REL-2 · biome or eslint+prettier; remove <code>any</code> drift (CQ-4)</small></li>
+        <li><b>Nonce expiry on monotonic clock</b><small>SEC-2</small></li>
+        <li><b>Symlink-safe scratch policy read</b><small>SEC-4 · realpath check</small></li>
+        <li><b>Await cancellation cleanup</b><small>SEC-7</small></li>
+        <li><b>Logging instead of silent catches</b><small>CQ-5 · pipe to observatory events</small></li>
+        <li><b>Doctor &amp; error UX polish</b><small>label CRITICAL vs WARNING; wrap JSON-parse errors with hints</small></li>
+        <li><b>README: install · quick-start · models · platforms · privacy</b><small>REL-3, REL-5, REL-7</small></li>
+      </ul>
+    </div>
+
+    <div class="lane p2" id="plan-p2">
+      <h4>P2 · polish</h4>
+      <ul>
+        <li><b>Drop or formally deprecate <code>--research</code></b><small>CQ-3 · pick one canonical name</small></li>
+        <li><b>Detached-descendants kill</b><small>SEC-5 · ps-walk or avoid <code>detached</code></small></li>
+        <li><b>Downloads scan opt-in</b><small>SEC-6 · filter by mtime + child-pid</small></li>
+        <li><b>Manifest schema doc + version policy</b><small>REL-6</small></li>
+        <li><b>CHANGELOG + stability statement</b><small>REL-6</small></li>
+        <li><b>Expert-name sanitization consolidation</b><small>SEC-8 · single helper</small></li>
+        <li><b>Constants extraction</b><small>CQ-6</small></li>
+      </ul>
+    </div>
+
+    <div class="lane p3" id="plan-p3">
+      <h4>P3 · nice-to-have</h4>
+      <ul>
+        <li><b>Observatory screenshots</b><small>README assets/</small></li>
+        <li><b>Worked example configs</b><small>code-review · research · prototype profiles</small></li>
+        <li><b>Sample <code>report.html</code> in docs</b><small>so users know what they get</small></li>
+        <li><b>Windows compat shim</b><small>if pi-agent itself supports Windows</small></li>
+        <li><b>Integration test that runs a real 1-round workshop</b><small>against a mock-model</small></li>
+        <li><b>Public stability label on each slash flag</b><small>stable · experimental</small></li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 id="filesplit">Proposed module split for <code>index.ts</code></h3>
+  <p>3,267 lines &rarr; a thin <code>index.ts</code> entry point plus six focused modules. Each can have its own targeted unit tests.</p>
+
+  <div class="diagram-wrap">
+    <svg viewBox="0 0 900 360" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="module split diagram">
+      <defs>
+        <style>
+          .m { fill: #1d2230; stroke: #2a3142; stroke-width: 1.4; rx: 8; }
+          .m.entry { stroke: #9cffd4; }
+          .lbl2 { fill: #e6e9ef; font: 600 13px ui-sans-serif, system-ui, sans-serif; }
+          .sub2 { fill: #aab2c0; font: 11px ui-monospace, Menlo, monospace; }
+          .arr2 { stroke: #7aa2ff; stroke-width: 1.5; fill: none; }
+        </style>
+        <marker id="arrow2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#7aa2ff"/>
+        </marker>
+      </defs>
+
+      <!-- entry -->
+      <rect class="m entry" x="350" y="20" width="200" height="60"/>
+      <text class="lbl2" x="370" y="44">index.ts</text>
+      <text class="sub2" x="370" y="62">register commands + tools</text>
+
+      <!-- modules row 1 -->
+      <rect class="m" x="20" y="140" width="200" height="74"/>
+      <text class="lbl2" x="38" y="164">schemas.ts</text>
+      <text class="sub2" x="38" y="182">Typebox + Static types</text>
+      <text class="sub2" x="38" y="198">params · config · audit</text>
+
+      <rect class="m" x="240" y="140" width="200" height="74"/>
+      <text class="lbl2" x="258" y="164">config.ts</text>
+      <text class="sub2" x="258" y="182">resolveWorkshopConfig()</text>
+      <text class="sub2" x="258" y="198">global · project · profile · CLI</text>
+
+      <rect class="m" x="460" y="140" width="200" height="74"/>
+      <text class="lbl2" x="478" y="164">cli-parser.ts</text>
+      <text class="sub2" x="478" y="182">parseWorkshopCommand()</text>
+      <text class="sub2" x="478" y="198">flag validation</text>
+
+      <rect class="m" x="680" y="140" width="200" height="74"/>
+      <text class="lbl2" x="698" y="164">planner.ts</text>
+      <text class="sub2" x="698" y="182">build prompt · run · parse</text>
+      <text class="sub2" x="698" y="198">sanitize planner JSON</text>
+
+      <!-- modules row 2 -->
+      <rect class="m" x="130" y="245" width="200" height="74"/>
+      <text class="lbl2" x="148" y="269">expert-runner.ts</text>
+      <text class="sub2" x="148" y="287">runChildPi · rounds · briefs</text>
+      <text class="sub2" x="148" y="303">tool audit · downloads</text>
+
+      <rect class="m" x="350" y="245" width="200" height="74"/>
+      <text class="lbl2" x="368" y="269">artifacts.ts</text>
+      <text class="sub2" x="368" y="287">scratch policy · nonce</text>
+      <text class="sub2" x="368" y="303">manifest + sha256</text>
+
+      <rect class="m" x="570" y="245" width="200" height="74"/>
+      <text class="lbl2" x="588" y="269">observatory.ts</text>
+      <text class="sub2" x="588" y="287">widget · inspector · panel</text>
+      <text class="sub2" x="588" y="303">DashboardState</text>
+
+      <!-- arrows -->
+      <path class="arr2" d="M450 80 L120 140" marker-end="url(#arrow2)"/>
+      <path class="arr2" d="M450 80 L340 140" marker-end="url(#arrow2)"/>
+      <path class="arr2" d="M450 80 L560 140" marker-end="url(#arrow2)"/>
+      <path class="arr2" d="M450 80 L780 140" marker-end="url(#arrow2)"/>
+      <path class="arr2" d="M450 80 L230 245" marker-end="url(#arrow2)"/>
+      <path class="arr2" d="M450 80 L450 245" marker-end="url(#arrow2)"/>
+      <path class="arr2" d="M450 80 L670 245" marker-end="url(#arrow2)"/>
+    </svg>
+    <div class="diagram-caption">Thin <code>index.ts</code> handles only <code>pi.registerCommand</code> / <code>pi.registerTool</code> wiring and delegates to focused modules.</div>
+  </div>
+
+  <div class="filemap">
+    <div class="file"><span class="fn">schemas.ts</span><br/>Typebox + <code>Static</code> types for params, config, audit, manifest.<div class="lines">~ L13–306 of current index.ts</div></div>
+    <div class="file"><span class="fn">config.ts</span><br/>Defaults, profile merge, global+project file loading, validation.<div class="lines">~ L143–650</div></div>
+    <div class="file"><span class="fn">cli-parser.ts</span><br/>Slash-flag parsing, public-tool sanitization.<div class="lines">~ L2583–2686, L2879–2920</div></div>
+    <div class="file"><span class="fn">planner.ts</span><br/><code>buildPlannerPrompt</code>, run, <b>strict</b> planner-JSON parse, expert resolution.<div class="lines">~ L1207–1276</div></div>
+    <div class="file"><span class="fn">expert-runner.ts</span><br/><code>runChildPi</code>, round dispatch, briefs, tool audit, downloads.<div class="lines">~ L750–1990</div></div>
+    <div class="file"><span class="fn">artifacts.ts</span><br/>Scratch policy R/W, manifest writer (atomic), sha256.<div class="lines">~ L1515–1565</div></div>
+    <div class="file"><span class="fn">observatory.ts</span><br/>Widget renderer, modal inspector, DashboardState.<div class="lines">~ L2051–2530</div></div>
+  </div>
+</section>
+
+<!-- ============== OPEN Q ============== -->
+<section id="openq">
+  <h2>5 · Open questions for you</h2>
+  <p class="lede">Decisions that block or steer P0. Worth resolving before any of the cleanup work starts.</p>
+  <ol>
+    <li><b>Models</b> &mdash; are <code>gpt-5.5</code>/<code>gpt-5.4-mini</code> real IDs in your provider, or placeholders? If placeholders, what should the default be — or should we ship with no default and force the user to configure?</li>
+    <li><b>Publishing target</b> &mdash; npm under <code>@earendil-works/</code>? Or distribute via <code>pi install &lt;git-url&gt;</code> only? Affects scope, registry, version policy.</li>
+    <li><b>Windows</b> &mdash; in-scope or explicitly out-of-scope for the public beta?</li>
+    <li><b>Downloads scan</b> &mdash; keep on-by-default (current behaviour), or flip to opt-in to avoid privacy surprises?</li>
+    <li><b>Legacy <code>--research</code></b> &mdash; deprecate with a warning, or drop entirely?</li>
+    <li><b>Manifest schema versioning</b> &mdash; if you bump the schema later, is the policy "old runs are read-only / not migrated" or "tool migrates on read"?</li>
+    <li><b>Stability promise on slash flags</b> &mdash; declare them stable, or mark some as experimental?</li>
+  </ol>
+
+  <div class="callout ok">
+    <strong>Next concrete step.</strong> Answer Q1 + Q2 (models &amp; publishing target). With those settled, the P0 lane becomes ~2 days of focused work: <code>tsconfig.json</code>, atomic manifest, planner reject, six behavioral tests, packaging metadata, GH Actions, README install section. P1 module split is another day on top of that.
+  </div>
+</section>
+
+</main>
+</div>
+
+</body>
+</html>
