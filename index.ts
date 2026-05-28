@@ -3,161 +3,62 @@ import * as fs from "node:fs/promises";
 import * as fssync from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { getMarkdownTheme, truncateHead, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
-import { Markdown, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { Type, type Static } from "typebox";
+import { getMarkdownTheme, truncateHead } from "@earendil-works/pi-coding-agent";
+import { Key, Markdown, Text, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
+import { MAX_ROUNDS, DEFAULT_ROUNDS, DEFAULT_TOOLS, AssistantBriefSchema, ExpertSchema, PublicExpertSchema, WorkshopParams, PublicWorkshopParams, type Intensity, type ResolutionStatus, type ExpertInput, type WorkshopInput, type PublicWorkshopInput } from "./schemas.ts";
+import { resolveWorkshopConfig, validateWorkshopConfig, definedOnly, type WorkshopConfig, type ResolvedWorkshopConfig } from "./config.ts";
+import { SCRATCH_POLICY_FILE, MANIFEST_FILE, writeFileQueued, writeJsonQueued, listFilesRecursive, writeScratchPolicy, readScratchPolicy, writeRunManifest, type ScratchPolicy } from "./artifacts.ts";
 
-const MAX_ROUNDS = 8;
-const DEFAULT_ROUNDS = 4;
-const DEFAULT_SCRATCH_TIMEOUT_SECONDS = 60;
-const DEFAULT_MAX_SCRATCH_TIMEOUT_SECONDS = 300;
-const DEFAULT_TOOLS = "read,grep,find,ls";
-const RESEARCH_TOOLS = "read,grep,find,ls,bash,web_search,fetch_content,get_search_content,code_search";
+const EXTENSION_VERSION = "0.2.0-safe-beta";
+const WEB_RESEARCH_TOOLS = "web_search,fetch_content,get_search_content,code_search";
 const PROTOTYPE_TOOL = "workshop_scratch";
 const OUTPUT_CAP_BYTES = 80 * 1024;
-const DEFAULT_STRONG_MODEL = "gpt-5.5";
-const DEFAULT_JUNIOR_MODEL = "gpt-5.4-mini";
 
-type Intensity = "normal" | "hard" | "ruthless";
-type ResolutionStatus = "ACCEPT" | "ITERATE" | "REJECT" | "ILL_POSED" | "UNRESOLVED";
-
-const AssistantBriefSchema = Type.Object({
-	agent: Type.Optional(StringEnum(["scout", "researcher", "oracle", "delegate"] as const, { default: "scout" })),
-	task: Type.String({ description: "Narrow task for the junior assistant/subagent to investigate for this expert" }),
-	model: Type.Optional(Type.String({ description: "Optional model for this assistant brief" })),
-});
-
-const ExpertSchema = Type.Object({
-	name: Type.String({ description: "Short expert name, e.g. 'aero' or 'scientific-programmer'" }),
-	stance: Type.String({ description: "What this expert owns and how they should attack the idea" }),
-	model: Type.Optional(Type.String({ description: "Optional pi model id for this expert, e.g. anthropic/claude-sonnet-4" })),
-	tools: Type.Optional(Type.String({ description: `Comma-separated pi tools for this expert. Default: ${DEFAULT_TOOLS}` })),
-	assistantBriefs: Type.Optional(Type.Array(AssistantBriefSchema, { description: "Tailored junior assistant brief tasks for this expert" })),
-});
-
-const WorkshopParams = Type.Object({
-	idea: Type.String({ description: "Technical idea, proposal, PRD excerpt, architecture, or question to workshop" }),
-	rounds: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_ROUNDS, default: DEFAULT_ROUNDS })),
-	profile: Type.Optional(Type.String({ description: "Named config profile to apply, e.g. workshop or safe. --workshop is shorthand for profile=workshop." })),
-	experts: Type.Optional(Type.Array(ExpertSchema, { minItems: 2, maxItems: 4 })),
-	contextPaths: Type.Optional(
-		Type.Array(Type.String(), { description: "Files/directories experts should inspect before making codebase claims" }),
-	),
-	interactive: Type.Optional(Type.Boolean({ description: "Ask the user to answer blocking open questions between rounds" })),
-	outputDir: Type.Optional(Type.String({ description: "Directory for workshop artifacts. Default: .pi/workshops/<timestamp-slug>" })),
-	cwd: Type.Optional(Type.String({ description: "Working directory for child pi expert processes. Default: current pi cwd" })),
-	strongModel: Type.Optional(Type.String({ description: `Model for meta-planner, main experts, and synthesizer when role-specific model is omitted. Default: current active parent model, else ${DEFAULT_STRONG_MODEL}` })),
-	plannerModel: Type.Optional(Type.String({ description: "Optional pi model id for the panel-designer/meta-planner" })),
-	expertModel: Type.Optional(Type.String({ description: "Optional default pi model id for main experts" })),
-	juniorModel: Type.Optional(Type.String({ description: `Model for junior scout/researcher subagents. Default: current active provider's ${DEFAULT_JUNIOR_MODEL} when available, else current active parent model` })),
-	synthModel: Type.Optional(Type.String({ description: "Optional pi model id for the synthesizer" })),
-	research: Type.Optional(
-		Type.Boolean({
-			description:
-				"Grant default experts bash in addition to read/search tools so they can do controlled external research (e.g. curl docs/pages) and deeper local inspection. Default false.",
-		}),
-	),
-	planExperts: Type.Optional(
-		Type.Boolean({
-			description:
-				"When experts are not provided, run a panel-designer pass to choose 2-4 expert roles for this idea. Default true.",
-		}),
-	),
-	subagents: Type.Optional(
-		Type.Boolean({
-			description:
-				"Run controlled parent-orchestrated pi-subagents briefing passes (scout, and researcher when research=true) for each expert before critique. Main experts still do not launch subagents unless expertSubagents is true or explicit expert tools include subagent. Default false.",
-		}),
-	),
-	expertSubagents: Type.Optional(
-		Type.Boolean({
-			description:
-				"Allow main expert agents to call the subagent tool directly by adding subagent to their tool list. Default false; --subagents alone only runs parent-orchestrated briefing subagents.",
-		}),
-	),
-	prototyping: Type.Optional(
-		Type.Boolean({
-			description:
-				"Give experts a workshop_scratch tool for isolated throwaway code/timing experiments under the workshop artifact directory. Default false.",
-		}),
-	),
-	htmlReport: Type.Optional(
-		Type.Boolean({
-			description:
-				"Write a self-contained HTML report with workflow, research/prototype artifacts, critiques, synthesis, and final resolution. Default false for tool calls; --workshop enables it for slash commands.",
-		}),
-	),
-	workshop: Type.Optional(
-		Type.Boolean({
-			description:
-				"Convenience shorthand for profile=workshop. The actual behavior is configurable in pi-workshop.config.json.",
-		}),
-	),
-});
-
-type ExpertInput = Static<typeof ExpertSchema>;
-type WorkshopInput = Static<typeof WorkshopParams>;
-
-type WorkshopConfig = {
-	defaults?: Partial<Omit<WorkshopInput, "idea" | "experts" | "contextPaths" | "outputDir" | "cwd">> & { keepDashboard?: boolean };
-	profiles?: Record<string, Partial<Omit<WorkshopInput, "idea" | "experts" | "contextPaths" | "outputDir" | "cwd">> & { keepDashboard?: boolean }>;
-	models?: {
-		strongModel?: string;
-		plannerModel?: string;
-		expertModel?: string;
-		juniorModel?: string;
-		synthModel?: string;
-	};
-	limits?: {
-		maxRounds?: number;
-		scratchTimeoutSeconds?: number;
-		maxScratchTimeoutSeconds?: number;
-	};
+type ObservedFile = {
+	path: string;
+	name: string;
+	source: "downloads" | "subagent-output" | "subagent-session" | "artifact-output" | "tool-output";
+	bytes?: number;
+	mtimeMs?: number;
+	detectedAt: string;
+	owner?: string;
+	phase?: string;
+	round?: number;
 };
 
-type ResolvedWorkshopConfig = {
-	params: WorkshopInput & { keepDashboard?: boolean };
-	limits: Required<NonNullable<WorkshopConfig["limits"]>>;
-	configPaths: string[];
-	profile?: string;
+type ToolAuditEvent = {
+	time: string;
+	child: string;
+	toolName: string;
+	eventType: string;
+	phase?: string;
+	round?: number;
+	argsPreview?: string;
+	resultPreview?: string;
 };
 
-const BUILTIN_CONFIG: Required<Pick<WorkshopConfig, "defaults" | "profiles" | "models" | "limits">> = {
-	defaults: {
-		rounds: DEFAULT_ROUNDS,
-		research: false,
-		planExperts: true,
-		subagents: false,
-		expertSubagents: false,
-		prototyping: false,
-		htmlReport: false,
-		workshop: false,
-		keepDashboard: false,
-	},
-	profiles: {
-		workshop: {
-			research: true,
-			subagents: true,
-			expertSubagents: true,
-			prototyping: true,
-			htmlReport: true,
-		},
-		safe: {
-			research: true,
-			subagents: true,
-			expertSubagents: false,
-			prototyping: false,
-			htmlReport: true,
-		},
-	},
-	models: {},
-	limits: {
-		maxRounds: MAX_ROUNDS,
-		scratchTimeoutSeconds: DEFAULT_SCRATCH_TIMEOUT_SECONDS,
-		maxScratchTimeoutSeconds: DEFAULT_MAX_SCRATCH_TIMEOUT_SECONDS,
-	},
+type SubagentAuditEntry = {
+	id: string;
+	name: string;
+	expert?: string;
+	agent?: string;
+	task?: string;
+	round?: number;
+	phase: "assistant_brief" | "direct_tool";
+	status: "running" | "done" | "failed";
+	startedAt: string;
+	finishedAt?: string;
+	durationMs?: number;
+	exitCode?: number;
+	timedOut?: boolean;
+	aborted?: boolean;
+	outputPreview?: string;
+	activity?: string[];
+	sessionExports?: string[];
+	savedOutputs?: string[];
+	artifactOutputs?: string[];
 };
 
 type ChildRun = {
@@ -166,6 +67,13 @@ type ChildRun = {
 	stderr: string;
 	exitCode: number;
 	model?: string;
+	phase?: string;
+	round?: number;
+	timedOut?: boolean;
+	aborted?: boolean;
+	durationMs?: number;
+	toolEvents?: ToolAuditEvent[];
+	artifacts?: ObservedFile[];
 	usage: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; turns: number };
 };
 
@@ -178,6 +86,7 @@ type WorkshopResult = {
 	transcriptPath: string;
 	resolutionPath: string;
 	workflowPath: string;
+	manifestPath: string;
 	reportPath?: string;
 	experts: string[];
 	subagentWorkflow: string[];
@@ -196,6 +105,11 @@ type PanelEvent =
 	| { type: "synth_start"; round: number }
 	| { type: "synth_done"; round: number; path: string; text: string; status: ResolutionStatus; converged: boolean }
 	| { type: "questions"; round: number; questions: string[] }
+	| { type: "subagent_start"; subagent: SubagentAuditEntry }
+	| { type: "subagent_activity"; id: string; text: string }
+	| { type: "subagent_done"; subagent: SubagentAuditEntry }
+	| { type: "tool_event"; event: ToolAuditEvent }
+	| { type: "download_detected"; files: ObservedFile[] }
 	| { type: "final"; result: WorkshopResult };
 
 const DEFAULT_EXPERTS: ExpertInput[] = [
@@ -212,7 +126,7 @@ const DEFAULT_EXPERTS: ExpertInput[] = [
 ];
 
 function timestampSlug(): string {
-	return new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+	return new Date().toISOString().replace(/[-:]/g, "").replace(/\./g, "");
 }
 
 function slugify(text: string): string {
@@ -231,6 +145,27 @@ function toolListIncludes(tools: string | undefined, name: string): boolean {
 function withTool(tools: string, name: string): string {
 	const list = tools.split(",").map((tool) => tool.trim()).filter(Boolean);
 	return list.includes(name) ? list.join(",") : [...list, name].join(",");
+}
+
+function uniqueToolList(tools: string[]): string {
+	return Array.from(new Set(tools.map((tool) => tool.trim()).filter(Boolean))).join(",");
+}
+
+function defaultToolsFor(options: { webResearch: boolean; localBash: boolean }): string {
+	return uniqueToolList([
+		...DEFAULT_TOOLS.split(","),
+		...(options.webResearch ? WEB_RESEARCH_TOOLS.split(",") : []),
+		...(options.localBash ? ["bash"] : []),
+	]);
+}
+
+function resolveExpertTools(explicitTools: string | undefined, options: { webResearch: boolean; localBash: boolean; expertSubagents: boolean; prototyping: boolean }): string {
+	const allowed = new Set(defaultToolsFor(options).split(","));
+	if (options.expertSubagents) allowed.add("subagent");
+	if (options.prototyping) allowed.add(PROTOTYPE_TOOL);
+	const requested = explicitTools?.trim() ? explicitTools.split(",").map((tool) => tool.trim()).filter(Boolean) : Array.from(allowed);
+	const sanitized = requested.filter((tool) => allowed.has(tool));
+	return uniqueToolList(sanitized.length ? sanitized : Array.from(allowed));
 }
 
 function activeModelRef(ctx: any): string | undefined {
@@ -252,101 +187,28 @@ function providerQualifiedIfAvailable(ctx: any, provider: string | undefined, mo
 	}
 }
 
-function mergeConfig(a: WorkshopConfig, b: WorkshopConfig): WorkshopConfig {
-	const profiles: NonNullable<WorkshopConfig["profiles"]> = { ...(a.profiles ?? {}) };
-	for (const [name, profile] of Object.entries(b.profiles ?? {})) {
-		profiles[name] = { ...(profiles[name] ?? {}), ...profile };
-	}
-	return {
-		defaults: { ...(a.defaults ?? {}), ...(b.defaults ?? {}) },
-		profiles,
-		models: { ...(a.models ?? {}), ...(b.models ?? {}) },
-		limits: { ...(a.limits ?? {}), ...(b.limits ?? {}) },
-	};
-}
-
-function definedOnly<T extends Record<string, any>>(obj: T): Partial<T> {
-	return Object.fromEntries(Object.entries(obj).filter(([, value]) => value !== undefined)) as Partial<T>;
-}
-
-async function readConfigFile(filePath: string): Promise<WorkshopConfig | undefined> {
-	try {
-		const text = await fs.readFile(filePath, "utf8");
-		const parsed = JSON.parse(text) as WorkshopConfig;
-		return parsed && typeof parsed === "object" ? parsed : undefined;
-	} catch (error) {
-		if ((error as any)?.code === "ENOENT") return undefined;
-		throw new Error(`Failed to read pi-workshop config ${filePath}: ${String((error as Error)?.message ?? error)}`);
-	}
-}
-
-async function findProjectConfig(cwd: string): Promise<string | undefined> {
-	let probe = cwd;
-	while (true) {
-		const candidate = path.join(probe, ".pi", "pi-workshop.config.json");
-		if (fssync.existsSync(candidate)) return candidate;
-		const parent = path.dirname(probe);
-		if (parent === probe || probe === os.homedir()) return undefined;
-		probe = parent;
-	}
-}
-
-async function resolveWorkshopConfig(cwd: string, params: WorkshopInput & { keepDashboard?: boolean }): Promise<ResolvedWorkshopConfig> {
-	let config: WorkshopConfig = BUILTIN_CONFIG;
-	const configPaths: string[] = [];
-	const globalPath = path.join(os.homedir(), ".pi", "agent", "pi-workshop.config.json");
-	const globalConfig = await readConfigFile(globalPath);
-	if (globalConfig) {
-		config = mergeConfig(config, globalConfig);
-		configPaths.push(globalPath);
-	}
-	const projectPath = await findProjectConfig(cwd);
-	if (projectPath) {
-		const projectConfig = await readConfigFile(projectPath);
-		if (projectConfig) {
-			config = mergeConfig(config, projectConfig);
-			configPaths.push(projectPath);
-		}
-	}
-	const requestedProfile = params.workshop ? "workshop" : params.profile;
-	const profileValues = requestedProfile ? (config.profiles?.[requestedProfile] ?? {}) : {};
-	const modelValues = config.models ?? {};
-	const mergedParams = definedOnly({
-		...(config.defaults ?? {}),
-		...profileValues,
-		...modelValues,
-		...definedOnly(params),
-	});
-	const maxRounds = Math.max(1, Math.min(MAX_ROUNDS, Number(config.limits?.maxRounds ?? MAX_ROUNDS)));
-	const rounds = Math.max(1, Math.min(maxRounds, Number(mergedParams.rounds ?? DEFAULT_ROUNDS)));
-	const maxScratchTimeoutSeconds = Math.max(1, Number(config.limits?.maxScratchTimeoutSeconds ?? DEFAULT_MAX_SCRATCH_TIMEOUT_SECONDS));
-	const scratchTimeoutSeconds = Math.max(1, Math.min(maxScratchTimeoutSeconds, Number(config.limits?.scratchTimeoutSeconds ?? DEFAULT_SCRATCH_TIMEOUT_SECONDS)));
-	return {
-		params: { ...mergedParams, rounds } as WorkshopInput & { keepDashboard?: boolean },
-		limits: {
-			maxRounds,
-			scratchTimeoutSeconds,
-			maxScratchTimeoutSeconds,
-		},
-		configPaths,
-		profile: requestedProfile,
-	};
-}
-
-async function writeFileQueued(filePath: string, content: string): Promise<void> {
-	await withFileMutationQueue(filePath, async () => {
-		await fs.mkdir(path.dirname(filePath), { recursive: true });
-		await fs.writeFile(filePath, content, "utf8");
-	});
-}
-
 function safeSegment(text: string): string {
 	return text.toLowerCase().replace(/[^a-z0-9_.-]+/g, "-").replace(/^-|-$/g, "").slice(0, 80) || "item";
 }
 
 function assertInside(parent: string, child: string): void {
 	const rel = path.relative(parent, child);
-	if (rel.startsWith("..") || path.isAbsolute(rel)) throw new Error(`Path escapes scratch directory: ${child}`);
+	if (rel.startsWith("..") || path.isAbsolute(rel)) throw new Error(`Path escapes allowed directory: ${child}`);
+}
+
+async function assertRealInside(parent: string, child: string): Promise<void> {
+	const realParent = await fs.realpath(parent);
+	const realChild = await fs.realpath(child);
+	assertInside(realParent, realChild);
+}
+
+function isAbortLike(error: unknown): boolean {
+	const message = String((error as Error)?.message ?? error);
+	return /aborted|cancelled|cancelled|AbortError/i.test(message);
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+	if (signal?.aborted) throw new Error("Workshop cancelled by abort signal");
 }
 
 function escapeHtml(text: string): string {
@@ -358,24 +220,131 @@ function escapeHtml(text: string): string {
 		.replace(/'/g, "&#39;");
 }
 
-async function listFilesRecursive(root: string): Promise<string[]> {
-	const files: string[] = [];
-	async function walk(dir: string) {
-		let entries: fssync.Dirent[] = [];
-		try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch { return; }
-		for (const entry of entries) {
-			const full = path.join(dir, entry.name);
-			if (entry.isDirectory()) await walk(full);
-			else files.push(full);
-		}
+function logWarn(context: string, error: unknown): void {
+	try {
+		const msg = String((error as Error)?.message ?? error);
+		process.stderr.write(`[pi-workshop] ${context}: ${msg}\n`);
+	} catch {
+		/* nothing we can do if stderr is broken */
 	}
-	await walk(root);
-	return files.sort();
 }
 
 function extractAssistantText(message: any): string {
 	if (!message?.content || !Array.isArray(message.content)) return "";
 	return message.content.filter((p: any) => p?.type === "text" && typeof p.text === "string").map((p: any) => p.text).join("\n");
+}
+
+function previewUnknown(value: unknown, max = 800): string | undefined {
+	if (value === undefined || value === null) return undefined;
+	let text: string;
+	if (typeof value === "string") text = value;
+	else {
+		try { text = JSON.stringify(value); }
+		catch { text = String(value); }
+	}
+	text = text.replace(/\s+/g, " ").trim();
+	return text ? text.slice(0, max) : undefined;
+}
+
+function firstMeaningfulLine(text: string, max = 220): string {
+	return text.split("\n").map((line) => line.trim()).find(Boolean)?.slice(0, max) ?? "";
+}
+
+async function observedFileFromPath(filePath: string, source: ObservedFile["source"], owner?: string, phase?: string, round?: number): Promise<ObservedFile> {
+	const stat = await fs.stat(filePath).catch(() => undefined);
+	return {
+		path: filePath,
+		name: path.basename(filePath),
+		source,
+		bytes: stat?.size,
+		mtimeMs: stat?.mtimeMs,
+		detectedAt: new Date().toISOString(),
+		owner,
+		phase,
+		round,
+	};
+}
+
+function parseSubagentOutputPaths(text: string): Pick<SubagentAuditEntry, "sessionExports" | "savedOutputs" | "artifactOutputs"> {
+	const sessionExports: string[] = [];
+	const savedOutputs: string[] = [];
+	const artifactOutputs: string[] = [];
+	let section = "";
+	for (const rawLine of text.split("\n")) {
+		const line = rawLine.trim();
+		if (/^##\s+Child session exports/i.test(line)) section = "session";
+		else if (/^##\s+Saved outputs/i.test(line)) section = "saved";
+		else if (/^##\s+Artifact outputs/i.test(line)) section = "artifact";
+		else if (/^##\s+/.test(line)) section = "";
+		const paths = [...line.matchAll(/`(\/[^`\n]+)`/g)].map((m) => m[1]).filter(Boolean) as string[];
+		const saved = line.match(/^Output saved to:\s+(\/\S+)/i)?.[1];
+		if (saved) paths.push(saved);
+		for (const p of paths) {
+			if (section === "session" || p.endsWith(".jsonl")) sessionExports.push(p);
+			else if (section === "artifact" || p.includes("/artifacts/")) artifactOutputs.push(p);
+			else savedOutputs.push(p);
+		}
+	}
+	const uniq = (items: string[]) => [...new Set(items)];
+	return { sessionExports: uniq(sessionExports), savedOutputs: uniq(savedOutputs), artifactOutputs: uniq(artifactOutputs) };
+}
+
+async function observedFilesFromSubagentRun(run: ChildRun): Promise<ObservedFile[]> {
+	const parsed = parseSubagentOutputPaths(run.text);
+	const entries: ObservedFile[] = [];
+	for (const file of parsed.sessionExports ?? []) entries.push(await observedFileFromPath(file, "subagent-session", run.name, run.phase, run.round));
+	for (const file of parsed.savedOutputs ?? []) entries.push(await observedFileFromPath(file, "subagent-output", run.name, run.phase, run.round));
+	for (const file of parsed.artifactOutputs ?? []) entries.push(await observedFileFromPath(file, "artifact-output", run.name, run.phase, run.round));
+	return entries;
+}
+
+async function snapshotDownloads(): Promise<Map<string, { bytes: number; mtimeMs: number }>> {
+	const dir = path.join(os.homedir(), "Downloads");
+	const out = new Map<string, { bytes: number; mtimeMs: number }>();
+	let entries: fssync.Dirent[] = [];
+	try { entries = await fs.readdir(dir, { withFileTypes: true }); }
+	catch { return out; }
+	for (const entry of entries) {
+		if (entry.name.startsWith(".")) continue;
+		const full = path.join(dir, entry.name);
+		const stat = await fs.stat(full).catch(() => undefined);
+		if (!stat) continue;
+		out.set(full, { bytes: stat.size, mtimeMs: stat.mtimeMs });
+	}
+	return out;
+}
+
+async function createDownloadAudit(onFiles?: (files: ObservedFile[]) => void): Promise<{ files: ObservedFile[]; scan: (owner?: string, phase?: string, round?: number) => Promise<ObservedFile[]> }> {
+	const baseline = await snapshotDownloads();
+	const seen = new Set(baseline.keys());
+	const files: ObservedFile[] = [];
+	return {
+		files,
+		scan: async (owner?: string, phase?: string, round?: number) => {
+			const current = await snapshotDownloads();
+			const fresh: ObservedFile[] = [];
+			for (const [filePath, stat] of current.entries()) {
+				if (seen.has(filePath)) continue;
+				seen.add(filePath);
+				fresh.push({
+					path: filePath,
+					name: path.basename(filePath),
+					source: "downloads",
+					bytes: stat.bytes,
+					mtimeMs: stat.mtimeMs,
+					detectedAt: new Date().toISOString(),
+					owner,
+					phase,
+					round,
+				});
+			}
+			if (fresh.length) {
+				files.push(...fresh);
+				onFiles?.(fresh);
+			}
+			return fresh;
+		},
+	};
 }
 
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
@@ -393,33 +362,75 @@ function shellQuoteForSlash(text: string): string {
 	return JSON.stringify(text);
 }
 
+function killProcessTree(proc: any, signal: NodeJS.Signals = "SIGTERM"): void {
+	if (!proc?.pid) return;
+	try {
+		process.kill(-proc.pid, signal);
+	} catch {
+		try { proc.kill(signal); } catch (error) { logWarn(`killProcessTree fallback pid=${proc.pid}`, error); }
+	}
+}
+
 async function runPiJsonPrompt(options: {
 	name: string;
 	prompt: string;
 	cwd: string;
 	tools?: string;
 	signal?: AbortSignal;
+	timeoutMs?: number;
+	phase?: string;
+	round?: number;
 	onProgress?: (text: string) => void;
+	onActivity?: (text: string) => void;
 }): Promise<ChildRun> {
 	const args = ["--mode", "json", "-p", "--no-session"];
 	if (options.tools) args.push("--tools", options.tools);
 	args.push(options.prompt);
+	const started = Date.now();
 	const result: ChildRun = {
 		name: options.name,
 		text: "",
 		stderr: "",
 		exitCode: 0,
+		phase: options.phase,
+		round: options.round,
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
 	};
 	let wasAborted = false;
+	let timedOut = false;
 	const exitCode = await new Promise<number>((resolve) => {
 		const invocation = getPiInvocation(args);
-		const proc = spawn(invocation.command, invocation.args, { cwd: options.cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+		const proc = spawn(invocation.command, invocation.args, { cwd: options.cwd, shell: false, detached: true, stdio: ["ignore", "pipe", "pipe"] });
 		let stdoutBuffer = "";
+		let sigkillTimer: NodeJS.Timeout | undefined;
+		let timeoutTimer: NodeJS.Timeout | undefined;
+		let settled = false;
+		const finish = (code: number) => {
+			if (settled) return;
+			settled = true;
+			if (stdoutBuffer.trim()) processLine(stdoutBuffer);
+			if (timeoutTimer) clearTimeout(timeoutTimer);
+			if (sigkillTimer) clearTimeout(sigkillTimer);
+			options.signal?.removeEventListener("abort", onAbort);
+			resolve(code);
+		};
+		const terminate = (reason: "abort" | "timeout") => {
+			if (reason === "abort") wasAborted = true;
+			if (reason === "timeout") timedOut = true;
+			killProcessTree(proc, "SIGTERM");
+			sigkillTimer = setTimeout(() => killProcessTree(proc, "SIGKILL"), 5000);
+			sigkillTimer.unref?.();
+		};
+		const onAbort = () => terminate("abort");
 		const processLine = (line: string) => {
 			if (!line.trim()) return;
 			let event: any;
-			try { event = JSON.parse(line); } catch { return; }
+			try { event = JSON.parse(line); } catch (error) { logWarn(`runPiJsonPrompt parse line (${options.name})`, error); return; }
+			if (event.type === "message_update" && event.message) {
+				const text = typeof event.message.content === "string" ? event.message.content : extractAssistantText(event.message);
+				const preview = firstMeaningfulLine(text, 180);
+				if (preview) options.onActivity?.(preview);
+			}
 			if (event.type === "message_end" && event.message) {
 				const msg = event.message;
 				let text = "";
@@ -447,15 +458,23 @@ async function runPiJsonPrompt(options: {
 			for (const line of lines) processLine(line);
 		});
 		proc.stderr.on("data", (data) => { result.stderr += data.toString(); });
-		proc.on("close", (code) => { if (stdoutBuffer.trim()) processLine(stdoutBuffer); resolve(code ?? 0); });
-		proc.on("error", (err) => { result.stderr += String(err?.message ?? err); resolve(1); });
-		const kill = () => { wasAborted = true; proc.kill("SIGTERM"); setTimeout(() => proc.kill("SIGKILL"), 5000).unref?.(); };
-		if (options.signal?.aborted) kill();
-		else options.signal?.addEventListener("abort", kill, { once: true });
+		proc.on("close", (code) => finish(code ?? 0));
+		proc.on("error", (err) => { result.stderr += String(err?.message ?? err); finish(1); });
+		if (options.timeoutMs && options.timeoutMs > 0) {
+			timeoutTimer = setTimeout(() => terminate("timeout"), options.timeoutMs);
+			timeoutTimer.unref?.();
+		}
+		if (options.signal?.aborted) onAbort();
+		else options.signal?.addEventListener("abort", onAbort, { once: true });
 	});
 	result.exitCode = exitCode;
+	result.aborted = wasAborted;
+	result.timedOut = timedOut;
+	result.durationMs = Date.now() - started;
 	if (wasAborted) result.stderr += "\nAborted.";
+	if (timedOut) result.stderr += `\nTimed out after ${Math.round((options.timeoutMs ?? 0) / 1000)}s.`;
 	if (!result.text.trim() && result.stderr.trim()) result.text = `[no output]\n\nSTDERR:\n${result.stderr}`;
+	result.artifacts = await observedFilesFromSubagentRun(result);
 	return result;
 }
 
@@ -467,9 +486,13 @@ async function runChildPi(options: {
 	model?: string;
 	tools?: string;
 	signal?: AbortSignal;
+	timeoutMs?: number;
+	phase?: string;
+	round?: number;
 	runDir: string;
 	onProgress?: (text: string) => void;
 	onActivity?: (text: string) => void;
+	onToolEvent?: (event: ToolAuditEvent) => void;
 }): Promise<ChildRun> {
 	const safeName = options.name.replace(/[^\w.-]+/g, "_");
 	const systemPath = path.join(options.runDir, `_system_${safeName}_${Date.now()}.md`);
@@ -479,36 +502,59 @@ async function runChildPi(options: {
 	if (options.model) args.push("--model", options.model);
 	args.push("--append-system-prompt", systemPath, options.userPrompt);
 
+	const started = Date.now();
 	const result: ChildRun = {
 		name: options.name,
 		text: "",
 		stderr: "",
 		exitCode: 0,
 		model: options.model,
+		phase: options.phase,
+		round: options.round,
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
+		toolEvents: [],
 	};
 
 	let wasAborted = false;
+	let timedOut = false;
 	const exitCode = await new Promise<number>((resolve) => {
 		const invocation = getPiInvocation(args);
 		const proc = spawn(invocation.command, invocation.args, {
 			cwd: options.cwd,
 			shell: false,
+			detached: true,
 			stdio: ["ignore", "pipe", "pipe"],
 		});
 		let stdoutBuffer = "";
+		let sigkillTimer: NodeJS.Timeout | undefined;
+		let timeoutTimer: NodeJS.Timeout | undefined;
+		let settled = false;
 
 		const processLine = (line: string) => {
 			if (!line.trim()) return;
 			let event: any;
 			try {
 				event = JSON.parse(line);
-			} catch {
+			} catch (error) {
+				logWarn(`runChildPi parse line (${options.name})`, error);
 				return;
 			}
 			const eventType = String(event.type ?? "");
-			const toolName = event.toolName ?? event.name ?? event.message?.toolName;
+			const rawToolName = event.toolName ?? event.name ?? event.message?.toolName ?? event.toolCall?.name ?? event.tool_call?.name;
+			const toolName = typeof rawToolName === "string" ? rawToolName : undefined;
 			if ((eventType.includes("tool") || eventType.includes("Tool")) && toolName) {
+				const audit: ToolAuditEvent = {
+					time: new Date().toISOString(),
+					child: options.name,
+					toolName,
+					eventType,
+					phase: options.phase,
+					round: options.round,
+					argsPreview: previewUnknown(event.input ?? event.args ?? event.arguments ?? event.toolCall?.input ?? event.tool_call?.arguments),
+					resultPreview: previewUnknown(event.result ?? event.output ?? event.content ?? event.message?.content),
+				};
+				result.toolEvents?.push(audit);
+				options.onToolEvent?.(audit);
 				options.onActivity?.(toolName === "subagent" ? "MAIN EXPERT called subagent tool" : toolName === PROTOTYPE_TOOL ? "ran scratch/prototype experiment" : `tool: ${toolName}`);
 			}
 			if (eventType === "message_update") {
@@ -533,6 +579,24 @@ async function runChildPi(options: {
 			}
 		};
 
+		const finish = (code: number) => {
+			if (settled) return;
+			settled = true;
+			if (stdoutBuffer.trim()) processLine(stdoutBuffer);
+			if (timeoutTimer) clearTimeout(timeoutTimer);
+			if (sigkillTimer) clearTimeout(sigkillTimer);
+			options.signal?.removeEventListener("abort", onAbort);
+			resolve(code);
+		};
+		const terminate = (reason: "abort" | "timeout") => {
+			if (reason === "abort") wasAborted = true;
+			if (reason === "timeout") timedOut = true;
+			killProcessTree(proc, "SIGTERM");
+			sigkillTimer = setTimeout(() => killProcessTree(proc, "SIGKILL"), 5000);
+			sigkillTimer.unref?.();
+		};
+		const onAbort = () => terminate("abort");
+
 		proc.stdout.on("data", (data) => {
 			stdoutBuffer += data.toString();
 			const lines = stdoutBuffer.split("\n");
@@ -542,26 +606,25 @@ async function runChildPi(options: {
 		proc.stderr.on("data", (data) => {
 			result.stderr += data.toString();
 		});
-		proc.on("close", (code) => {
-			if (stdoutBuffer.trim()) processLine(stdoutBuffer);
-			resolve(code ?? 0);
-		});
+		proc.on("close", (code) => finish(code ?? 0));
 		proc.on("error", (err) => {
 			result.stderr += String(err?.message ?? err);
-			resolve(1);
+			finish(1);
 		});
-
-		const kill = () => {
-			wasAborted = true;
-			proc.kill("SIGTERM");
-			setTimeout(() => proc.kill("SIGKILL"), 5000).unref?.();
-		};
-		if (options.signal?.aborted) kill();
-		else options.signal?.addEventListener("abort", kill, { once: true });
+		if (options.timeoutMs && options.timeoutMs > 0) {
+			timeoutTimer = setTimeout(() => terminate("timeout"), options.timeoutMs);
+			timeoutTimer.unref?.();
+		}
+		if (options.signal?.aborted) onAbort();
+		else options.signal?.addEventListener("abort", onAbort, { once: true });
 	});
 
 	result.exitCode = exitCode;
+	result.aborted = wasAborted;
+	result.timedOut = timedOut;
+	result.durationMs = Date.now() - started;
 	if (wasAborted) result.stderr += "\nAborted.";
+	if (timedOut) result.stderr += `\nTimed out after ${Math.round((options.timeoutMs ?? 0) / 1000)}s.`;
 	if (!result.text.trim() && result.stderr.trim()) result.text = `[no assistant text]\n\nSTDERR:\n${result.stderr}`;
 	return result;
 }
@@ -581,7 +644,7 @@ function intensityRules(intensity: Intensity): string {
 	].join("\n");
 }
 
-function expertSystemPrompt(expert: ExpertInput, intensity: Intensity, tools: string, parentBriefsEnabled: boolean, prototypingEnabled: boolean, workshopDir?: string): string {
+function expertSystemPrompt(expert: ExpertInput, intensity: Intensity, tools: string, parentBriefsEnabled: boolean, prototypingEnabled: boolean, workshopDir?: string, scratchNonce?: string): string {
 	const canCallSubagents = toolListIncludes(tools, "subagent");
 	const canPrototype = prototypingEnabled && toolListIncludes(tools, PROTOTYPE_TOOL);
 	return `# Pi Workshopist: ${expert.name}
@@ -597,11 +660,12 @@ Available tools for this run: ${tools}
 Subagent / delegation policy:
 - Parent-orchestrated assistant briefs: ${parentBriefsEnabled ? "ENABLED. Any assistant-brief files were run by the parent orchestrator before you speak; they are junior input, not your own tool calls." : "DISABLED. No parent-run assistant briefs are expected."}
 - Main-expert direct subagent calls: ${canCallSubagents ? "ENABLED because the subagent tool is in your available tools. Use it only for narrow research/verification; report when you used it and remain responsible for judgment." : "DISABLED. You cannot launch subagents in this run. Do not claim you used them."}
-- Scratch/prototype experiments: ${canPrototype ? `ENABLED via ${PROTOTYPE_TOOL}. Use it for throwaway code, timing checks, small simulations, parsing experiments, or executable sanity checks. Workshop dir: ${workshopDir ?? "(not supplied)"}` : "DISABLED. Do not claim you ran code experiments unless you actually used a tool."}
+- Scratch/prototype experiments: ${canPrototype ? `ENABLED via ${PROTOTYPE_TOOL}. Use it for throwaway code, timing checks, small simulations, parsing experiments, or executable sanity checks. Workshop dir: ${workshopDir ?? "(not supplied)"}. Required nonce: ${scratchNonce ?? "(missing)"}. This is artifact-contained only, not a security sandbox.` : "DISABLED. Do not claim you ran code experiments unless you actually used a tool."}
 
 Tool policy:
 - Default tools are read/search only: read, grep, find, ls.
-- If bash is granted, you may use it for local inspection and controlled research commands. Do not mutate project state.
+- Web research tools may be granted separately from local shell access.
+- If bash is granted through the explicit localBash policy, you may use it for local inspection and controlled commands. Do not mutate project state.
 - If a web/search tool is installed and explicitly included in available tools, you may use it.
 - If subagent is explicitly included in available tools, you may delegate only narrow research/verification tasks; you remain responsible for final judgment.
 - If subagent is not in available tools, do not pretend you used it.
@@ -708,6 +772,7 @@ function buildRoundPrompt(args: {
 	assistantBriefPaths: string[];
 	prototyping: boolean;
 	workshopDir: string;
+	scratchNonce?: string;
 }): string {
 	const context = args.contextPaths.length ? args.contextPaths.map((p) => `- ${p}`).join("\n") : "- (none supplied)";
 	const panel = args.panelExperts.map((e) => `- ${e.name}: ${e.stance}`).join("\n");
@@ -741,7 +806,7 @@ ${args.assistantBriefPaths.length ? args.assistantBriefPaths.map((p) => `- ${p}`
 If assistant briefs are present, read them before finalizing your critique. These subagents were launched by the parent orchestrator before your critique; they are not evidence that you personally called subagents. Treat them as junior research/scouting input, not authority. You own judgment and must correct or ignore weak brief claims.
 
 Scratch/prototype workspace:
-${args.prototyping ? `- Enabled. Use ${PROTOTYPE_TOOL} with workshopDir=${args.workshopDir} and expertName=${args.expertName}. Cite generated artifact paths and key outputs.` : "- Disabled."}
+${args.prototyping ? `- Enabled. Use ${PROTOTYPE_TOOL} with workshopDir=${args.workshopDir}, expertName=${args.expertName}, and nonce=${args.scratchNonce ?? "(missing)"}. Cite generated artifact paths and key outputs. This is artifact-contained only, not a security sandbox.` : "- Disabled."}
 
 Write your answer in the strict format. End with exactly one VERDICT line.`;
 }
@@ -792,8 +857,6 @@ function parsePlannedExperts(text: string): ExpertInput[] | null {
 			experts?: Array<{
 				name?: unknown;
 				stance?: unknown;
-				tools?: unknown;
-				model?: unknown;
 				assistantBriefs?: Array<{ agent?: unknown; task?: unknown; model?: unknown }>;
 			}>;
 		};
@@ -801,14 +864,11 @@ function parsePlannedExperts(text: string): ExpertInput[] | null {
 			.map((e) => ({
 				name: String(e.name ?? "").toLowerCase().replace(/[^a-z0-9.-]+/g, "-").replace(/^-|-$/g, ""),
 				stance: String(e.stance ?? "").trim(),
-				tools: typeof e.tools === "string" ? e.tools : undefined,
-				model: typeof e.model === "string" ? e.model : undefined,
 				assistantBriefs: Array.isArray(e.assistantBriefs)
 					? e.assistantBriefs
 						.map((b) => ({
-							agent: ["scout", "researcher", "oracle", "delegate"].includes(String(b.agent ?? "")) ? (String(b.agent) as any) : "scout",
+							agent: ["scout", "researcher"].includes(String(b.agent ?? "")) ? (String(b.agent) as any) : "scout",
 							task: String(b.task ?? "").trim(),
-							model: typeof b.model === "string" ? b.model : undefined,
 						}))
 						.filter((b) => b.task)
 						.slice(0, 3)
@@ -817,7 +877,8 @@ function parsePlannedExperts(text: string): ExpertInput[] | null {
 			.filter((e) => e.name && e.stance)
 			.slice(0, 4);
 		return experts.length >= 2 ? experts : null;
-	} catch {
+	} catch (error) {
+		logWarn("parsePlannedExperts", error);
 		return null;
 	}
 }
@@ -830,10 +891,13 @@ async function runExpertAssistantBrief(args: {
 	contextPaths: string[];
 	baseCwd: string;
 	workshopDir: string;
-	research: boolean;
+	webResearch: boolean;
 	juniorModel: string;
 	signal?: AbortSignal;
+	childTimeoutMs?: number;
 	onUpdate?: (text: string) => void;
+	recordChildRun?: (run: ChildRun) => void;
+	onPanelEvent?: (event: PanelEvent) => void;
 }): Promise<string> {
 	const safeName = args.expert.name.replace(/[^\w.-]+/g, "_");
 	const out = path.join(args.workshopDir, `round_${args.round}_${safeName}_assistant_brief.md`);
@@ -843,7 +907,7 @@ async function runExpertAssistantBrief(args: {
 			agent: "scout" as const,
 			task: `Create a local/code/context scouting brief for expert ${args.expert.name}.\n\nExpert stance:\n${args.expert.stance}\n\nIdea file: ${args.ideaPath}\nWorking synthesis: ${args.workingPath}\nContext paths:\n${context}\n\nFocus on facts this expert should know before critique. Cite files/paths. Do not edit project files.`,
 		},
-		...(args.research
+		...(args.webResearch
 			? [
 					{
 						agent: "researcher" as const,
@@ -856,21 +920,54 @@ async function runExpertAssistantBrief(args: {
 	let content = `# Assistant brief for ${args.expert.name} (round ${args.round})\n\nJunior model default: ${args.juniorModel}\n`;
 	for (const [i, brief] of briefs.entries()) {
 		const agent = brief.agent ?? "scout";
-		if (agent === "researcher" && !args.research) {
-			content += `\n\n## ${i + 1}. researcher subagent skipped\n\nResearch brief requested by planner, but --research was not enabled. Re-run with --research --subagents for web-backed research.\n\nTask:\n${brief.task}\n`;
+		if (agent === "researcher" && !args.webResearch) {
+			content += `\n\n## ${i + 1}. researcher subagent skipped\n\nResearch brief requested by planner, but webResearch was not enabled. Re-run with --web-research --subagents for web-backed research.\n\nTask:\n${brief.task}\n`;
 			continue;
 		}
 		const model = brief.model ?? args.juniorModel;
 		const agentSpec = model ? `${agent}[model=${model}]` : agent;
 		const task = `${brief.task}\n\nExpert receiving this brief: ${args.expert.name}\nExpert stance:\n${args.expert.stance}\n\nIdea file: ${args.ideaPath}\nWorking synthesis: ${args.workingPath}\nContext paths:\n${context}\n\nOutput a concise evidence brief. Do not decide the final verdict; the main expert owns judgment.`;
+		const subagentId = `${args.round}:${args.expert.name}:${i + 1}:${agent}`;
+		const startedAt = new Date().toISOString();
+		args.onPanelEvent?.({
+			type: "subagent_start",
+			subagent: { id: subagentId, name: `${args.expert.name}-${agent}-subagent`, expert: args.expert.name, agent, task: brief.task, round: args.round, phase: "assistant_brief", status: "running", startedAt, activity: ["queued"] },
+		});
 		const run = await runPiJsonPrompt({
 			name: `${args.expert.name}-${agent}-subagent`,
 			prompt: `/run ${agentSpec} ${shellQuoteForSlash(task)}`,
 			cwd: args.baseCwd,
 			tools: "subagent",
 			signal: args.signal,
+			timeoutMs: args.childTimeoutMs,
+			phase: "assistant_brief",
+			round: args.round,
 			onProgress: args.onUpdate,
+			onActivity: (text) => args.onPanelEvent?.({ type: "subagent_activity", id: subagentId, text }),
 		});
+		const parsedPaths = parseSubagentOutputPaths(run.text);
+		args.onPanelEvent?.({
+			type: "subagent_done",
+			subagent: {
+				id: subagentId,
+				name: run.name,
+				expert: args.expert.name,
+				agent,
+				task: brief.task,
+				round: args.round,
+				phase: "assistant_brief",
+				status: run.exitCode === 0 && !run.timedOut && !run.aborted ? "done" : "failed",
+				startedAt,
+				finishedAt: new Date().toISOString(),
+				durationMs: run.durationMs,
+				exitCode: run.exitCode,
+				timedOut: run.timedOut,
+				aborted: run.aborted,
+				outputPreview: firstMeaningfulLine(run.text),
+				...parsedPaths,
+			},
+		});
+		args.recordChildRun?.(run);
 		content += `\n\n## ${i + 1}. ${agent} subagent\n\nModel: ${model}\n\nTask:\n${brief.task}\n\nResult:\n${run.text}\n`;
 	}
 	await writeFileQueued(out, content);
@@ -900,8 +997,12 @@ Produce synthesis in strict format. Last two lines must be STATUS then CONVERGED
 }
 
 function parseStatus(text: string): ResolutionStatus {
-	const match = text.match(/^STATUS:\s*(ACCEPT|ITERATE|REJECT|ILL_POSED|UNRESOLVED)\s*$/im);
+	const match = text.match(/^STATUS:\s*(ACCEPT|ITERATE|REJECT|ILL_POSED|UNRESOLVED|DEGRADED|FAILED|CANCELLED)\s*$/im);
 	return (match?.[1] as ResolutionStatus | undefined) ?? "UNRESOLVED";
+}
+
+function hasStrictSynthesisStatus(text: string): boolean {
+	return /^STATUS:\s*(ACCEPT|ITERATE|REJECT|ILL_POSED|UNRESOLVED|DEGRADED|FAILED|CANCELLED)\s*$/im.test(text) && /^CONVERGED:\s*(YES|NO)\s*$/im.test(text);
 }
 
 function parseConverged(text: string): boolean {
@@ -1028,29 +1129,87 @@ async function runWorkshop(
 	onArtifact?: (artifact: { kind: "critique" | "synthesis"; round: number; name: string; path: string; text: string }) => void,
 	onPanelEvent?: (event: PanelEvent) => void,
 ): Promise<WorkshopResult> {
+	const startedAt = new Date();
 	const baseCwd = resolveMaybe(ctx.cwd, params.cwd ?? ".");
 	const resolvedConfig = await resolveWorkshopConfig(baseCwd, params);
 	params = resolvedConfig.params;
 	const rounds = params.rounds ?? DEFAULT_ROUNDS;
 	const intensity: Intensity = "hard";
 	const workshop = Boolean(params.workshop || resolvedConfig.profile === "workshop");
-	const researchEnabled = Boolean(params.research);
+	const webResearchEnabled = Boolean(params.webResearch);
+	const localBashEnabled = Boolean(params.localBash);
 	const parentBriefsEnabled = Boolean(params.subagents);
 	const expertSubagentsEnabled = Boolean(params.expertSubagents);
 	const prototypingEnabled = Boolean(params.prototyping);
 	const htmlReportEnabled = Boolean(params.htmlReport);
+	const childRuns: ChildRun[] = [];
+	const errors: string[] = [];
+	let degraded = false;
+	const downloadAudit = await createDownloadAudit((files) => onPanelEvent?.({ type: "download_detected", files }));
+	const scanDownloads = (owner?: string, phase?: string, round?: number) => downloadAudit.scan(owner, phase, round).catch(() => []);
+	const childTimeoutMs = resolvedConfig.limits.childTimeoutSeconds * 1000;
+	const runAbort = new AbortController();
+	const onExternalAbort = () => runAbort.abort();
+	if (signal?.aborted) runAbort.abort();
+	else signal?.addEventListener("abort", onExternalAbort, { once: true });
+	let globalTimeoutRemainingMs = resolvedConfig.limits.globalTimeoutSeconds * 1000;
+	let globalTimerStartedAt = 0;
+	let globalTimer: NodeJS.Timeout | undefined;
+	const startGlobalTimer = () => {
+		if (runAbort.signal.aborted || globalTimer) return;
+		if (globalTimeoutRemainingMs <= 0) {
+			runAbort.abort();
+			return;
+		}
+		globalTimerStartedAt = Date.now();
+		globalTimer = setTimeout(() => runAbort.abort(), globalTimeoutRemainingMs);
+		globalTimer.unref?.();
+	};
+	const pauseGlobalTimer = () => {
+		if (!globalTimer) return;
+		clearTimeout(globalTimer);
+		globalTimer = undefined;
+		globalTimeoutRemainingMs = Math.max(0, globalTimeoutRemainingMs - (Date.now() - globalTimerStartedAt));
+	};
+	const stopGlobalTimer = () => {
+		if (globalTimer) clearTimeout(globalTimer);
+		globalTimer = undefined;
+	};
+	startGlobalTimer();
+	const runSignal = runAbort.signal;
+	const recordChildRun = (run: ChildRun) => {
+		childRuns.push(run);
+		void scanDownloads(run.name, run.phase, run.round);
+		if (run.exitCode !== 0 || run.timedOut || run.aborted) {
+			degraded = true;
+			errors.push(`${run.phase ?? "child"}:${run.name} exited ${run.exitCode}${run.timedOut ? " (timeout)" : ""}${run.aborted ? " (aborted)" : ""}`);
+		}
+	};
+	const emitToolEvent = (event: ToolAuditEvent) => {
+		onPanelEvent?.({ type: "tool_event", event });
+		void scanDownloads(event.child, event.phase, event.round);
+	};
 	const inheritedModel = activeModelRef(ctx);
 	const inheritedProvider = activeProvider(ctx);
-	const strongModel = params.strongModel ?? inheritedModel ?? DEFAULT_STRONG_MODEL;
+	const strongModel = params.strongModel ?? inheritedModel;
+	if (!strongModel) {
+		throw new Error(
+			"pi-workshop: no strongModel available. Set models.strongModel in ~/.pi/agent/pi-workshop.config.json or pass --strong-model, or launch pi with a default model so the workshop can inherit it.",
+		);
+	}
 	const plannerModel = params.plannerModel ?? strongModel;
 	const expertModel = params.expertModel ?? strongModel;
 	const synthModel = params.synthModel ?? strongModel;
-	const juniorModel = params.juniorModel ?? providerQualifiedIfAvailable(ctx, inheritedProvider, DEFAULT_JUNIOR_MODEL) ?? inheritedModel ?? DEFAULT_JUNIOR_MODEL;
+	const juniorModel = params.juniorModel ?? (inheritedProvider ? providerQualifiedIfAvailable(ctx, inheritedProvider, strongModel) : undefined) ?? inheritedModel ?? strongModel;
 	const contextPaths = (params.contextPaths ?? []).map((p) => resolveMaybe(baseCwd, p));
 	const workshopDir = params.outputDir
 		? resolveMaybe(baseCwd, params.outputDir)
 		: path.join(baseCwd, ".pi", "workshops", `${timestampSlug()}-${slugify(params.idea)}`);
 	await fs.mkdir(workshopDir, { recursive: true });
+	const realWorkshopDir = await fs.realpath(workshopDir);
+	if (prototypingEnabled && !realWorkshopDir.includes(`${path.sep}.pi${path.sep}workshops${path.sep}`)) {
+		throw new Error("prototyping/workshop_scratch requires the workshop artifact directory to be under .pi/workshops");
+	}
 
 	const ideaPath = path.join(workshopDir, "idea.md");
 	const workingPath = path.join(workshopDir, "working-resolution.md");
@@ -1058,12 +1217,14 @@ async function runWorkshop(
 	const transcriptPath = path.join(workshopDir, "transcript.md");
 	const finalPath = path.join(workshopDir, "resolution.md");
 	const workflowPath = path.join(workshopDir, "workflow.md");
+	const manifestPath = path.join(workshopDir, MANIFEST_FILE);
 	await writeFileQueued(ideaPath, `# Technical idea for workshop\n\n${params.idea.trim()}\n`);
 	await writeFileQueued(
 		workingPath,
 		`# Working resolution\n\nInitial idea is untested. Experts must converge on ACCEPT, ITERATE, REJECT, ILL_POSED, or UNRESOLVED.\n`,
 	);
 	await writeFileQueued(answersPath, "# User answers / rulings\n");
+	throwIfAborted(runSignal);
 
 	const allRoundFiles: string[] = [];
 	let experts: ExpertInput[] = params.experts?.length ? params.experts : DEFAULT_EXPERTS;
@@ -1077,33 +1238,47 @@ async function runWorkshop(
 			userPrompt: buildPlannerPrompt(ideaPath, contextPaths),
 			cwd: baseCwd,
 			model: plannerModel,
-			tools: researchEnabled ? RESEARCH_TOOLS : DEFAULT_TOOLS,
-			signal,
+			tools: defaultToolsFor({ webResearch: webResearchEnabled, localBash: localBashEnabled }),
+			signal: runSignal,
+			timeoutMs: childTimeoutMs,
+			phase: "planner",
 			runDir: workshopDir,
 			onProgress: onUpdate,
+			onToolEvent: emitToolEvent,
 		});
+		recordChildRun(planner);
 		await writeFileQueued(planPath, planner.text);
 		allRoundFiles.push(planPath);
 		const planned = parsePlannedExperts(planner.text);
 		if (planned) experts = planned;
+		else if (planner.exitCode !== 0 || !planner.text.trim()) {
+			degraded = true;
+			errors.push("Planner failed or returned no parseable experts; falling back to fixed experts.");
+		}
 		onPanelEvent?.({ type: "planner_done", experts: experts.map((e) => e.name), path: planPath });
 	}
-	const baseExpertTools = researchEnabled ? RESEARCH_TOOLS : DEFAULT_TOOLS;
 	experts = experts.slice(0, 4).map((expert) => {
-		let tools = expert.tools ?? baseExpertTools;
-		if (expertSubagentsEnabled) tools = withTool(tools, "subagent");
-		if (prototypingEnabled) tools = withTool(tools, PROTOTYPE_TOOL);
+		const tools = resolveExpertTools(expert.tools, {
+			webResearch: webResearchEnabled,
+			localBash: localBashEnabled,
+			expertSubagents: expertSubagentsEnabled,
+			prototyping: prototypingEnabled,
+		});
 		return {
 			...expert,
 			model: expert.model ?? expertModel,
 			tools,
 		};
 	});
+	const scratchPolicy = prototypingEnabled ? await writeScratchPolicy(workshopDir, experts, resolvedConfig.limits.globalTimeoutSeconds) : undefined;
 	const mainExpertsCanUseSubagents = experts.some((expert) => toolListIncludes(expert.tools, "subagent"));
 	const subagentWorkflow = [
 		`Config files: ${resolvedConfig.configPaths.length ? resolvedConfig.configPaths.join(", ") : "built-in defaults only"}`,
 		`Profile: ${resolvedConfig.profile ?? "none"}`,
 		`Scratch timeout: ${resolvedConfig.limits.scratchTimeoutSeconds}s default, ${resolvedConfig.limits.maxScratchTimeoutSeconds}s max before approval/escalation`,
+		`Child timeout: ${resolvedConfig.limits.childTimeoutSeconds}s; global timeout: ${resolvedConfig.limits.globalTimeoutSeconds}s`,
+		`Web research tools: ${webResearchEnabled ? "enabled" : "disabled"}`,
+		`Local bash tools: ${localBashEnabled ? "enabled" : "disabled"}`,
 		`Workshop mode (--workshop): ${workshop ? "enabled" : "disabled"}`,
 		`Parent-orchestrated assistant briefs (--subagents): ${parentBriefsEnabled ? "enabled" : "disabled"}`,
 		`Main expert direct subagent tool: ${mainExpertsCanUseSubagents ? "enabled" : "disabled"}`,
@@ -1116,7 +1291,7 @@ async function runWorkshop(
 			? "If an expert calls subagent directly, dashboard activity will show 'MAIN EXPERT called subagent tool' when JSON tool events expose it."
 			: "In the default slash workflow, main experts cannot call subagents; use --expert-subagents/--workshop or explicit expert.tools='...,subagent' to allow that.",
 		prototypingEnabled
-			? `Experts can run throwaway experiments through ${PROTOTYPE_TOOL}; artifacts are under scratch/<expert>/ and included in report.html.`
+			? `Experts can run throwaway experiments through ${PROTOTYPE_TOOL}; artifacts are under scratch/<expert>/ and included in report.html. Scratch calls require the per-run nonce and are artifact-contained, not sandboxed.`
 			: `Experts cannot run scratch experiments unless --prototype/--workshop or prototyping=true is used.`,
 	];
 	await writeFileQueued(workflowPath, `# Pi workshop workflow\n\n${subagentWorkflow.map((line) => `- ${line}`).join("\n")}\n\n## Expert tools\n\n${experts.map((expert) => `- ${expert.name}: ${expert.tools}`).join("\n")}\n`);
@@ -1130,6 +1305,11 @@ async function runWorkshop(
 	let roundsRun = 0;
 
 	for (let round = 1; round <= rounds; round++) {
+		if (runSignal.aborted) {
+			status = "CANCELLED";
+			converged = false;
+			break;
+		}
 		roundsRun = round;
 		onPanelEvent?.({ type: "round_start", round, rounds, experts: experts.map((e) => e.name) });
 		onUpdate?.(`Round ${round}/${rounds}: expert critique`);
@@ -1147,15 +1327,20 @@ async function runWorkshop(
 						contextPaths,
 						baseCwd,
 						workshopDir,
-						research: researchEnabled,
+						webResearch: webResearchEnabled,
 						juniorModel,
-						signal,
+						signal: runSignal,
+						childTimeoutMs,
 						onUpdate,
+						recordChildRun,
+						onPanelEvent,
 					});
 					assistantBriefs.set(expert.name, [briefPath]);
 					allRoundFiles.push(briefPath);
 					onPanelEvent?.({ type: "brief_done", round, name: expert.name, path: briefPath });
 				} catch (error) {
+					degraded = true;
+					errors.push(`Assistant brief failed for ${expert.name}: ${String((error as Error)?.message ?? error)}`);
 					const safeName = expert.name.replace(/[^\w.-]+/g, "_");
 					const briefPath = path.join(workshopDir, `round_${round}_${safeName}_assistant_brief_error.md`);
 					await writeFileQueued(briefPath, `# Assistant brief failed for ${expert.name}\n\n${String((error as Error)?.stack ?? error)}\n`);
@@ -1180,7 +1365,7 @@ async function runWorkshop(
 					onPanelEvent?.({ type: "expert_start", round, name: expert.name });
 					const run = await runChildPi({
 						name: expert.name,
-						systemPrompt: expertSystemPrompt(expert, intensity, expert.tools ?? DEFAULT_TOOLS, parentBriefsEnabled, prototypingEnabled, workshopDir),
+						systemPrompt: expertSystemPrompt(expert, intensity, expert.tools ?? DEFAULT_TOOLS, parentBriefsEnabled, prototypingEnabled, workshopDir, scratchPolicy?.nonce),
 						userPrompt: buildRoundPrompt({
 							round,
 							maxRounds: rounds,
@@ -1196,15 +1381,21 @@ async function runWorkshop(
 							assistantBriefPaths: assistantBriefs.get(expert.name) ?? [],
 							prototyping: prototypingEnabled,
 							workshopDir,
+							scratchNonce: scratchPolicy?.nonce,
 						}),
 						cwd: baseCwd,
 						model: expert.model,
 						tools: expert.tools,
-						signal,
+						signal: runSignal,
+						timeoutMs: childTimeoutMs,
+						phase: "expert",
+						round,
 						runDir: workshopDir,
 						onProgress: onUpdate,
 						onActivity: (text) => onPanelEvent?.({ type: "expert_activity", round, name: expert.name, text }),
+						onToolEvent: emitToolEvent,
 					});
+					recordChildRun(run);
 					await writeFileQueued(out, run.text);
 					onPanelEvent?.({ type: "expert_done", round, name: expert.name, path: out, text: run.text });
 					onArtifact?.({ kind: "critique", round, name: expert.name, path: out, text: run.text });
@@ -1217,7 +1408,7 @@ async function runWorkshop(
 				onPanelEvent?.({ type: "expert_start", round, name: expert.name });
 				const run = await runChildPi({
 					name: expert.name,
-					systemPrompt: expertSystemPrompt(expert, intensity, expert.tools ?? DEFAULT_TOOLS, parentBriefsEnabled, prototypingEnabled, workshopDir),
+					systemPrompt: expertSystemPrompt(expert, intensity, expert.tools ?? DEFAULT_TOOLS, parentBriefsEnabled, prototypingEnabled, workshopDir, scratchPolicy?.nonce),
 					userPrompt: buildRoundPrompt({
 						round,
 						maxRounds: rounds,
@@ -1233,20 +1424,31 @@ async function runWorkshop(
 						assistantBriefPaths: assistantBriefs.get(expert.name) ?? [],
 						prototyping: prototypingEnabled,
 						workshopDir,
+						scratchNonce: scratchPolicy?.nonce,
 					}),
 					cwd: baseCwd,
 					model: expert.model,
 					tools: expert.tools,
-					signal,
+					signal: runSignal,
+					timeoutMs: childTimeoutMs,
+					phase: "expert",
+					round,
 					runDir: workshopDir,
 					onProgress: onUpdate,
 					onActivity: (text) => onPanelEvent?.({ type: "expert_activity", round, name: expert.name, text }),
+					onToolEvent: emitToolEvent,
 				});
+				recordChildRun(run);
 				await writeFileQueued(out, run.text);
 				onPanelEvent?.({ type: "expert_done", round, name: expert.name, path: out, text: run.text });
 				onArtifact?.({ kind: "critique", round, name: expert.name, path: out, text: run.text });
 				critiquePaths.push(out);
 			}
+		}
+		if (runSignal.aborted) {
+			status = "CANCELLED";
+			converged = false;
+			break;
 		}
 
 		critiquePaths.sort();
@@ -1268,11 +1470,20 @@ async function runWorkshop(
 			}),
 			cwd: baseCwd,
 			model: synthModel,
-			tools: researchEnabled ? RESEARCH_TOOLS : DEFAULT_TOOLS,
-			signal,
+			tools: defaultToolsFor({ webResearch: webResearchEnabled, localBash: localBashEnabled }),
+			signal: runSignal,
+			timeoutMs: childTimeoutMs,
+			phase: "synthesis",
+			round,
 			runDir: workshopDir,
 			onProgress: onUpdate,
+			onToolEvent: emitToolEvent,
 		});
+		recordChildRun(synth);
+		if (!hasStrictSynthesisStatus(synth.text)) {
+			degraded = true;
+			errors.push(`Synthesizer returned malformed or incomplete status in round ${round}.`);
+		}
 		await writeFileQueued(synthOut, synth.text);
 		onArtifact?.({ kind: "synthesis", round, name: "synthesizer", path: synthOut, text: synth.text });
 		await writeFileQueued(workingPath, synth.text);
@@ -1280,19 +1491,40 @@ async function runWorkshop(
 		previousSynthesisPath = synthOut;
 		status = parseStatus(synth.text);
 		converged = parseConverged(synth.text);
+		if (degraded && status === "UNRESOLVED") status = "DEGRADED";
 		onPanelEvent?.({ type: "synth_done", round, path: synthOut, text: synth.text, status, converged });
+		if (runSignal.aborted) {
+			status = "CANCELLED";
+			converged = false;
+			break;
+		}
 
 		const questions = extractQuestions(synth.text);
 		if (questions.length) onPanelEvent?.({ type: "questions", round, questions });
-		const userAnswered = params.interactive ? await askUserForQuestions(ctx, round, questions, answersPath) : false;
+		let userAnswered = false;
+		if (params.interactive && questions.length) {
+			pauseGlobalTimer();
+			try {
+				userAnswered = await askUserForQuestions(ctx, round, questions, answersPath);
+			} finally {
+				startGlobalTimer();
+			}
+		}
 		if (userAnswered && round < rounds) converged = false;
 		if (converged) break;
 	}
 
+	if (runSignal.aborted) {
+		status = "CANCELLED";
+		converged = false;
+		await writeFileQueued(workingPath, `# Workshop cancelled\n\nSTATUS: CANCELLED\nCONVERGED: NO\n\nThe run was cancelled or timed out. Partial artifacts remain in this directory.\n`);
+	} else if (degraded && !converged) {
+		status = "DEGRADED";
+	}
 	const finalText = await fs.readFile(workingPath, "utf8");
 	const truncation = truncateHead(finalText, { maxBytes: OUTPUT_CAP_BYTES, maxLines: 2000 });
 	await writeFileQueued(finalPath, finalText);
-	await writeFileQueued(transcriptPath, await formatTranscript(allRoundFiles, finalPath));
+	await writeFileQueued(transcriptPath, await formatTranscript(allRoundFiles, finalText));
 
 	let reportPath: string | undefined;
 	const resultBase = {
@@ -1303,6 +1535,7 @@ async function runWorkshop(
 		transcriptPath,
 		resolutionPath: finalPath,
 		workflowPath,
+		manifestPath,
 		experts: experts.map((e) => e.name),
 		subagentWorkflow,
 	};
@@ -1318,6 +1551,29 @@ async function runWorkshop(
 			result: resultBase,
 		});
 	}
+	await scanDownloads("workshop", "final", roundsRun);
+	await writeRunManifest(workshopDir, {
+		extensionVersion: EXTENSION_VERSION,
+		piNodeVersion: process.version,
+		startedAt: startedAt.toISOString(),
+		finishedAt: new Date().toISOString(),
+		durationMs: Date.now() - startedAt.getTime(),
+		status,
+		converged,
+		profile: resolvedConfig.profile ?? null,
+		configPaths: resolvedConfig.configPaths,
+		params: { ...params, idea: params.idea },
+		limits: resolvedConfig.limits,
+		models: { strongModel, plannerModel, expertModel, synthModel, juniorModel },
+		experts: experts.map((expert) => ({ name: expert.name, model: expert.model, tools: expert.tools })),
+		childRuns,
+		downloadedFiles: downloadAudit.files,
+		errors,
+		scratchPolicy: scratchPolicy ? { path: SCRATCH_POLICY_FILE, allowedExperts: scratchPolicy.allowedExperts, expiresAt: scratchPolicy.expiresAt, artifactContainedNotSandboxed: true } : undefined,
+		reportPath: reportPath ?? null,
+	});
+	signal?.removeEventListener("abort", onExternalAbort);
+	stopGlobalTimer();
 
 	const summary = [
 		`# Workshop resolution`,
@@ -1329,6 +1585,7 @@ async function runWorkshop(
 		`Artifacts:`,
 		`- Resolution: ${finalPath}`,
 		`- Workflow: ${workflowPath}`,
+		`- Manifest: ${manifestPath}`,
 		reportPath ? `- HTML report: ${reportPath}` : undefined,
 		`- Transcript: ${transcriptPath}`,
 		`- Workshop dir: ${workshopDir}`,
@@ -1351,20 +1608,23 @@ async function runWorkshop(
 	return result;
 }
 
-type LaneState = { name: string; status: "queued" | "running" | "done"; activity: string[]; path?: string };
+type LaneState = { name: string; status: "queued" | "running" | "done"; activity: string[]; path?: string; text?: string };
 type DashboardState = {
 	round: number;
 	rounds: number;
 	phase: string;
 	lanes: Map<string, LaneState>;
-	synthesis?: { status?: ResolutionStatus; converged?: boolean; activity: string[]; path?: string };
+	synthesis?: { status?: ResolutionStatus; converged?: boolean; activity: string[]; path?: string; text?: string };
 	questions: string[];
 	delegation: string[];
+	subagents: SubagentAuditEntry[];
+	toolEvents: ToolAuditEvent[];
+	downloads: ObservedFile[];
 	final?: WorkshopResult;
 };
 
 function createDashboardState(): DashboardState {
-	return { round: 0, rounds: 0, phase: "starting", lanes: new Map(), synthesis: { activity: [] }, questions: [], delegation: [] };
+	return { round: 0, rounds: 0, phase: "starting", lanes: new Map(), synthesis: { activity: [] }, questions: [], delegation: [], subagents: [], toolEvents: [], downloads: [] };
 }
 
 function pushActivity(items: string[], text: string, limit = 4): void {
@@ -1432,6 +1692,7 @@ function updateDashboardState(state: DashboardState, event: PanelEvent): void {
 		const lane = state.lanes.get(event.name) ?? { name: event.name, status: "done" as const, activity: [] };
 		lane.status = "done";
 		lane.path = event.path;
+		lane.text = event.text;
 		pushActivity(lane.activity, event.text.split("\n").find((line) => line.trim().startsWith("VERDICT:")) ?? "critique complete");
 		state.lanes.set(event.name, lane);
 		return;
@@ -1443,13 +1704,80 @@ function updateDashboardState(state: DashboardState, event: PanelEvent): void {
 	}
 	if (event.type === "synth_done") {
 		state.phase = event.converged ? "converged" : "not converged";
-		state.synthesis = { status: event.status, converged: event.converged, activity: [], path: event.path };
+		state.synthesis = { status: event.status, converged: event.converged, activity: [], path: event.path, text: event.text };
 		pushActivity(state.synthesis.activity, `${event.status} / converged=${event.converged ? "yes" : "no"}`);
 		return;
 	}
 	if (event.type === "questions") {
 		state.questions = event.questions;
 		state.phase = "awaiting user input";
+		return;
+	}
+	if (event.type === "subagent_start") {
+		state.subagents = [...state.subagents.filter((item) => item.id !== event.subagent.id), event.subagent];
+		const lane = event.subagent.expert ? state.lanes.get(event.subagent.expert) : undefined;
+		if (lane) {
+			pushActivity(lane.activity, `subagent ${event.subagent.agent ?? "run"} started`);
+			state.lanes.set(lane.name, lane);
+		}
+		return;
+	}
+	if (event.type === "subagent_activity") {
+		state.subagents = state.subagents.map((item) => {
+			if (item.id !== event.id) return item;
+			const activity = [...(item.activity ?? [])];
+			pushActivity(activity, event.text, 8);
+			return { ...item, activity, outputPreview: event.text };
+		});
+		return;
+	}
+	if (event.type === "subagent_done") {
+		const previous = state.subagents.find((item) => item.id === event.subagent.id);
+		state.subagents = [...state.subagents.filter((item) => item.id !== event.subagent.id), { ...event.subagent, activity: previous?.activity ?? event.subagent.activity }];
+		const observedAt = new Date().toISOString();
+		const subagentFiles: ObservedFile[] = [
+			...(event.subagent.sessionExports ?? []).map((filePath) => ({ path: filePath, name: path.basename(filePath), source: "subagent-session" as const, detectedAt: observedAt, owner: event.subagent.name, phase: event.subagent.phase, round: event.subagent.round })),
+			...(event.subagent.savedOutputs ?? []).map((filePath) => ({ path: filePath, name: path.basename(filePath), source: "subagent-output" as const, detectedAt: observedAt, owner: event.subagent.name, phase: event.subagent.phase, round: event.subagent.round })),
+			...(event.subagent.artifactOutputs ?? []).map((filePath) => ({ path: filePath, name: path.basename(filePath), source: "artifact-output" as const, detectedAt: observedAt, owner: event.subagent.name, phase: event.subagent.phase, round: event.subagent.round })),
+		];
+		if (subagentFiles.length) {
+			const existing = new Set(state.downloads.map((file) => file.path));
+			state.downloads = [...state.downloads, ...subagentFiles.filter((file) => !existing.has(file.path))].slice(-100);
+		}
+		const lane = event.subagent.expert ? state.lanes.get(event.subagent.expert) : undefined;
+		if (lane) {
+			pushActivity(lane.activity, `subagent ${event.subagent.agent ?? "run"} ${event.subagent.status}`);
+			state.lanes.set(lane.name, lane);
+		}
+		return;
+	}
+	if (event.type === "tool_event") {
+		state.toolEvents = [...state.toolEvents, event.event].slice(-200);
+		if (event.event.toolName === "subagent" && /call|start|begin/i.test(event.event.eventType)) {
+			const id = `direct:${event.event.child}:${event.event.round ?? "?"}:${state.toolEvents.length}`;
+			state.subagents = [...state.subagents, {
+				id,
+				name: `${event.event.child} direct subagent`,
+				expert: event.event.child,
+				round: event.event.round,
+				phase: "direct_tool",
+				status: "running",
+				startedAt: event.event.time,
+				outputPreview: event.event.resultPreview ?? event.event.argsPreview,
+			}].slice(-100);
+		} else if (event.event.toolName === "subagent" && /result|end|complete|done/i.test(event.event.eventType)) {
+			let updated = false;
+			state.subagents = state.subagents.map((item) => {
+				if (updated || item.phase !== "direct_tool" || item.expert !== event.event.child || item.status !== "running") return item;
+				updated = true;
+				return { ...item, status: "done", finishedAt: event.event.time, outputPreview: event.event.resultPreview ?? item.outputPreview };
+			});
+		}
+		return;
+	}
+	if (event.type === "download_detected") {
+		const existing = new Set(state.downloads.map((file) => file.path));
+		state.downloads = [...state.downloads, ...event.files.filter((file) => !existing.has(file.path))].slice(-100);
 		return;
 	}
 	if (event.type === "final") {
@@ -1471,6 +1799,22 @@ function boxLines(title: string, status: string, body: string[], width: number, 
 	const rows = [theme.fg(color, status), ...body].slice(0, 5);
 	while (rows.length < 5) rows.push("");
 	return [top, ...rows.map((row) => theme.fg(color, "│") + padAnsi(row, inner) + theme.fg(color, "│")), bottom];
+}
+
+function dashboardStatsLine(state: DashboardState, theme: any): string {
+	const parentSubagents = state.subagents.filter((item) => item.phase === "assistant_brief").length;
+	const directSubagents = state.subagents.filter((item) => item.phase === "direct_tool").length;
+	const runningSubagents = state.subagents.filter((item) => item.status === "running").length;
+	const downloaded = state.downloads.filter((file) => file.source === "downloads").length;
+	const savedFiles = state.downloads.length - downloaded;
+	const toolEvents = state.toolEvents.length;
+	const parts = [
+		`${parentSubagents + directSubagents} subagent${parentSubagents + directSubagents === 1 ? "" : "s"}${runningSubagents ? ` (${runningSubagents} running)` : ""}`,
+		`${downloaded} downloaded file${downloaded === 1 ? "" : "s"}`,
+		`${savedFiles} saved/artifact file${savedFiles === 1 ? "" : "s"}`,
+		`${toolEvents} tool event${toolEvents === 1 ? "" : "s"}`,
+	];
+	return theme.fg("accent", "observatory") + theme.fg("muted", `  ${parts.join(" • ")}  •  /workshop-observatory or Ctrl+Alt+W to inspect`);
 }
 
 function renderDashboardLines(state: DashboardState, theme: any, width: number): string[] {
@@ -1534,7 +1878,8 @@ function renderDashboardLines(state: DashboardState, theme: any, width: number):
 	if (state.final) {
 		lines.push(...boxLines("resolution", state.final.status, [theme.fg("dim", state.final.reportPath ?? state.final.resolutionPath)], w, theme, state.final.converged ? "success" : "warning"));
 	}
-	return lines.slice(0, 28);
+	lines.push(truncateToWidth(dashboardStatsLine(state, theme), w));
+	return lines.slice(0, 30);
 }
 
 function installDashboardWidget(ctx: any, state: DashboardState): void {
@@ -1546,6 +1891,199 @@ function installDashboardWidget(ctx: any, state: DashboardState): void {
 		}),
 		{ placement: "aboveEditor" },
 	);
+}
+
+function formatBytes(bytes?: number): string {
+	if (bytes === undefined) return "unknown size";
+	if (bytes < 1024) return `${bytes} B`;
+	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+	return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+type ObservatoryItem = { label: string; description: string; detail: () => string };
+
+function observatoryItems(state: DashboardState): ObservatoryItem[] {
+	const items: ObservatoryItem[] = [];
+	for (const lane of state.lanes.values()) {
+		items.push({
+			label: `expert: ${lane.name}`,
+			description: `${lane.status}${lane.path ? ` • ${path.basename(lane.path)}` : ""}`,
+			detail: () => [
+				`# Expert lane: ${lane.name}`,
+				`Status: ${lane.status}`,
+				lane.path ? `Artifact: ${lane.path}` : "Artifact: not written yet",
+				"",
+				"## Recent activity",
+				...(lane.activity.length ? lane.activity.map((a) => `- ${a}`) : ["- none yet"]),
+				"",
+				lane.text ? `## Critique preview\n\n${lane.text.slice(0, 6000)}` : "Critique preview not available yet.",
+			].join("\n"),
+		});
+	}
+	if (state.synthesis?.path || state.synthesis?.activity.length) {
+		items.push({
+			label: "synthesis",
+			description: `${state.synthesis.status ?? "running"}${state.synthesis.path ? ` • ${path.basename(state.synthesis.path)}` : ""}`,
+			detail: () => [
+				"# Synthesis",
+				`Status: ${state.synthesis?.status ?? "running"}`,
+				`Converged: ${state.synthesis?.converged ? "yes" : "no"}`,
+				state.synthesis?.path ? `Artifact: ${state.synthesis.path}` : "Artifact: not written yet",
+				"",
+				state.synthesis?.text ? state.synthesis.text.slice(0, 6000) : (state.synthesis?.activity ?? []).join("\n"),
+			].join("\n"),
+		});
+	}
+	for (const sub of state.subagents.slice().reverse()) {
+		items.push({
+			label: `subagent: ${sub.name}`,
+			description: `${sub.status} • ${sub.phase}${sub.expert ? ` • ${sub.expert}` : ""}`,
+			detail: () => [
+				`# Subagent thread: ${sub.name}`,
+				`Status: ${sub.status}`,
+				`Phase: ${sub.phase}`,
+				sub.expert ? `Expert: ${sub.expert}` : undefined,
+				sub.agent ? `Agent: ${sub.agent}` : undefined,
+				sub.round ? `Round: ${sub.round}` : undefined,
+				`Started: ${sub.startedAt}`,
+				sub.finishedAt ? `Finished: ${sub.finishedAt}` : undefined,
+				sub.durationMs !== undefined ? `Duration: ${(sub.durationMs / 1000).toFixed(1)}s` : undefined,
+				sub.exitCode !== undefined ? `Exit code: ${sub.exitCode}` : undefined,
+				"",
+				sub.task ? `## Task\n${sub.task}` : undefined,
+				sub.activity?.length ? `## Live/recent activity\n${sub.activity.map((a) => `- ${a}`).join("\n")}` : undefined,
+				sub.outputPreview ? `## Output preview\n${sub.outputPreview}` : undefined,
+				sub.sessionExports?.length ? `## Session exports\n${sub.sessionExports.map((p) => `- ${p}`).join("\n")}` : undefined,
+				sub.savedOutputs?.length ? `## Saved outputs\n${sub.savedOutputs.map((p) => `- ${p}`).join("\n")}` : undefined,
+				sub.artifactOutputs?.length ? `## Artifact outputs\n${sub.artifactOutputs.map((p) => `- ${p}`).join("\n")}` : undefined,
+			].filter(Boolean).join("\n"),
+		});
+	}
+	for (const file of state.downloads.slice().reverse()) {
+		items.push({
+			label: `${file.source === "downloads" ? "download" : "file"}: ${file.name}`,
+			description: `${file.source} • ${formatBytes(file.bytes)}${file.owner ? ` • ${file.owner}` : ""}`,
+			detail: () => [
+				`# File: ${file.name}`,
+				`Path: ${file.path}`,
+				`Source: ${file.source}`,
+				`Size: ${formatBytes(file.bytes)}`,
+				file.mtimeMs ? `Modified: ${new Date(file.mtimeMs).toISOString()}` : undefined,
+				`Detected: ${file.detectedAt}`,
+				file.owner ? `Owner/child: ${file.owner}` : undefined,
+				file.phase ? `Phase: ${file.phase}` : undefined,
+				file.round ? `Round: ${file.round}` : undefined,
+			].filter(Boolean).join("\n"),
+		});
+	}
+	for (const event of state.toolEvents.slice(-50).reverse()) {
+		items.push({
+			label: `tool: ${event.toolName}`,
+			description: `${event.child} • ${event.eventType}`,
+			detail: () => [
+				`# Tool event: ${event.toolName}`,
+				`Child: ${event.child}`,
+				`Event: ${event.eventType}`,
+				`Time: ${event.time}`,
+				event.phase ? `Phase: ${event.phase}` : undefined,
+				event.round ? `Round: ${event.round}` : undefined,
+				"",
+				event.argsPreview ? `## Args\n${event.argsPreview}` : undefined,
+				event.resultPreview ? `## Result\n${event.resultPreview}` : undefined,
+			].filter(Boolean).join("\n"),
+		});
+	}
+	if (state.final) {
+		items.unshift({
+			label: "final resolution",
+			description: `${state.final.status} • ${state.final.converged ? "converged" : "not converged"}`,
+			detail: () => [
+				"# Final resolution",
+				`Status: ${state.final?.status}`,
+				`Converged: ${state.final?.converged ? "yes" : "no"}`,
+				`Workshop dir: ${state.final?.workshopDir}`,
+				`Resolution: ${state.final?.resolutionPath}`,
+				`Transcript: ${state.final?.transcriptPath}`,
+				state.final?.reportPath ? `Report: ${state.final.reportPath}` : undefined,
+			].filter(Boolean).join("\n"),
+		});
+	}
+	return items;
+}
+
+function launchWorkshopObservatory(ctx: any, state: DashboardState, setRefresh: (requestRender?: () => void) => void): void {
+	void openWorkshopObservatory(ctx, state, setRefresh).catch((error) => {
+		ctx.ui.notify(`Workshop observatory failed: ${String((error as Error)?.message ?? error)}`, "error");
+	});
+}
+
+async function openWorkshopObservatory(ctx: any, state?: DashboardState, onRefresh?: (requestRender?: () => void) => void): Promise<void> {
+	if (!state) {
+		ctx.ui.notify("No active workshop observatory state yet", "warning");
+		return;
+	}
+	if (!ctx.hasUI) {
+		ctx.ui.notify("/workshop-observatory requires the interactive TUI", "warning");
+		return;
+	}
+	try {
+		await ctx.ui.custom((tui: any, theme: any, _keybindings: any, done: () => void) => {
+		onRefresh?.(() => tui.requestRender());
+		let selected = 0;
+		let detail = false;
+		let scroll = 0;
+		const renderList = (width: number): string[] => {
+			const items = observatoryItems(state);
+			if (selected >= items.length) selected = Math.max(0, items.length - 1);
+			const header = theme.fg("accent", theme.bold("workshop observatory navigator")) + theme.fg("muted", `  ${dashboardStatsLine(state, theme).replace(/\x1b\[[0-9;]*m/g, "")}`);
+			const lines = [truncateToWidth(header, width), truncateToWidth(theme.fg("dim", "↑↓ select • enter details • esc close"), width)];
+			if (!items.length) return [...lines, theme.fg("muted", "No observable expert/subagent/file events yet.")];
+			const windowSize = 18;
+			const start = Math.max(0, Math.min(selected - Math.floor(windowSize / 2), items.length - windowSize));
+			for (let i = start; i < Math.min(items.length, start + windowSize); i++) {
+				const item = items[i];
+				const prefix = i === selected ? theme.fg("accent", "› ") : "  ";
+				const text = `${item.label} — ${item.description}`;
+				lines.push(truncateToWidth(prefix + (i === selected ? theme.fg("accent", text) : text), width));
+			}
+			return lines;
+		};
+		const renderDetail = (width: number): string[] => {
+			const items = observatoryItems(state);
+			const item = items[selected];
+			if (!item) return renderList(width);
+			const body = item.detail();
+			const wrapped = body.split("\n").flatMap((line) => wrapTextWithAnsi(line || " ", Math.max(20, width - 2)));
+			const visible = wrapped.slice(scroll, scroll + 24);
+			return [
+				truncateToWidth(theme.fg("accent", theme.bold(item.label)) + theme.fg("muted", "  ↑↓ scroll • ←/backspace list • esc close"), width),
+				...visible.map((line) => truncateToWidth(line, width)),
+				truncateToWidth(theme.fg("dim", `${Math.min(scroll + visible.length, wrapped.length)}/${wrapped.length} lines`), width),
+			];
+		};
+		return {
+			render: (width: number) => detail ? renderDetail(width) : renderList(width),
+			invalidate: () => {},
+			handleInput: (data: string) => {
+				const items = observatoryItems(state);
+				if (matchesKey(data, Key.escape)) { done(); return; }
+				if (detail) {
+					if (matchesKey(data, Key.left) || matchesKey(data, Key.backspace)) { detail = false; scroll = 0; tui.requestRender(); return; }
+					if (matchesKey(data, Key.up)) scroll = Math.max(0, scroll - 1);
+					else if (matchesKey(data, Key.down)) scroll += 1;
+					tui.requestRender();
+					return;
+				}
+				if (matchesKey(data, Key.up)) selected = Math.max(0, selected - 1);
+				else if (matchesKey(data, Key.down)) selected = Math.min(Math.max(0, items.length - 1), selected + 1);
+				else if (matchesKey(data, Key.enter) && items.length) { detail = true; scroll = 0; }
+				tui.requestRender();
+			},
+		};
+		}, { overlay: true, overlayOptions: { width: "90%", maxHeight: "85%", anchor: "center", margin: 1 } });
+	} finally {
+		onRefresh?.(undefined);
+	}
 }
 
 async function listWorkshopSessions(cwd: string): Promise<Array<{ dir: string; label: string; mtimeMs: number; status?: string }>> {
@@ -1585,99 +2123,180 @@ async function listWorkshopSessions(cwd: string): Promise<Array<{ dir: string; l
 	return sessions.sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, 30);
 }
 
-function parseWorkshopCommand(args: string): Pick<WorkshopInput, "idea" | "rounds" | "profile" | "research" | "planExperts" | "subagents" | "expertSubagents" | "prototyping" | "htmlReport" | "workshop" | "strongModel" | "plannerModel" | "expertModel" | "juniorModel" | "synthModel"> & { keepDashboard?: boolean } {
+type ParsedWorkshopCommand = Pick<WorkshopInput, "idea" | "rounds" | "profile" | "webResearch" | "localBash" | "planExperts" | "subagents" | "expertSubagents" | "prototyping" | "htmlReport" | "workshop" | "strongModel" | "plannerModel" | "expertModel" | "juniorModel" | "synthModel"> & { keepDashboard?: boolean; openObservatory?: boolean; check?: boolean };
+
+function unquoteArg(text: string): string {
+	return text.replace(/^"|"$/g, "");
+}
+
+function parsePositiveIntFlag(value: string, flag: string): number {
+	const parsed = Number(value);
+	if (!Number.isInteger(parsed) || parsed < 1 || parsed > MAX_ROUNDS) throw new Error(`${flag} must be an integer between 1 and ${MAX_ROUNDS}`);
+	return parsed;
+}
+
+function parseFlagBooleanValue(value: string, flag: string): boolean {
+	if (/^(true|1|yes|on)$/i.test(value)) return true;
+	if (/^(false|0|no|off)$/i.test(value)) return false;
+	throw new Error(`${flag} expects a boolean value`);
+}
+
+function parseWorkshopCommand(args: string): ParsedWorkshopCommand {
 	const parts = args.match(/(?:[^\s"]+|"[^"]*")+/g) ?? [];
-	let rounds: number | undefined;
-	let profile: string | undefined;
-	let research: boolean | undefined;
-	let planExperts: boolean | undefined;
-	let keepDashboard: boolean | undefined;
-	let subagents: boolean | undefined;
-	let expertSubagents: boolean | undefined;
-	let prototyping: boolean | undefined;
-	let htmlReport: boolean | undefined;
-	let workshop: boolean | undefined;
-	let strongModel: string | undefined;
-	let plannerModel: string | undefined;
-	let expertModel: string | undefined;
-	let juniorModel: string | undefined;
-	let synthModel: string | undefined;
+	const parsed: ParsedWorkshopCommand = { idea: "" };
 	const ideaParts: string[] = [];
+	const takeValue = (i: number, flag: string): [string, number] => {
+		if (parts[i]?.startsWith(`${flag}=`)) return [unquoteArg(parts[i].slice(flag.length + 1)), i];
+		if (!parts[i + 1] || parts[i + 1].startsWith("--")) throw new Error(`${flag} requires a value`);
+		return [unquoteArg(parts[i + 1]), i + 1];
+	};
+	const setBoolean = (name: keyof ParsedWorkshopCommand, value: boolean) => { (parsed as any)[name] = value; };
 	for (let i = 0; i < parts.length; i++) {
-		const raw = parts[i].replace(/^"|"$/g, "");
-		if (raw === "--rounds" && parts[i + 1]) {
-			rounds = Number(parts[++i].replace(/^"|"$/g, ""));
+		const raw = unquoteArg(parts[i]);
+		if (raw === "--rounds" || raw.startsWith("--rounds=")) {
+			const [value, next] = takeValue(i, "--rounds");
+			parsed.rounds = parsePositiveIntFlag(value, "--rounds");
+			i = next;
 			continue;
 		}
-		if (raw.startsWith("--rounds=")) {
-			rounds = Number(raw.slice("--rounds=".length));
+		if (raw === "--profile" || raw.startsWith("--profile=")) {
+			const [value, next] = takeValue(i, "--profile");
+			parsed.profile = value;
+			i = next;
 			continue;
 		}
-		if (raw === "--profile" && parts[i + 1]) {
-			profile = parts[++i].replace(/^"|"$/g, "");
-			continue;
-		}
-		if (raw.startsWith("--profile=")) {
-			profile = raw.slice("--profile=".length);
-			continue;
-		}
-		if (raw === "--research" || raw === "--web") {
-			research = true;
-			continue;
-		}
-		if (raw === "--fixed-experts" || raw === "--no-plan") {
-			planExperts = false;
-			continue;
-		}
-		if (raw === "--plan") {
-			planExperts = true;
-			continue;
-		}
-		if (raw === "--keep-dashboard") {
-			keepDashboard = true;
-			continue;
-		}
-		if (raw === "--subagents" || raw === "--briefs") {
-			subagents = true;
-			continue;
-		}
-		if (raw === "--expert-subagents" || raw === "--allow-expert-subagents") {
-			expertSubagents = true;
-			continue;
-		}
-		if (raw === "--prototype" || raw === "--prototypes" || raw === "--prototyping") {
-			prototyping = true;
-			continue;
-		}
-		if (raw === "--html-report" || raw === "--report") {
-			htmlReport = true;
-			continue;
-		}
-		if (raw === "--workshop" || raw === "--rlm") {
-			workshop = true;
-			continue;
-		}
-		const readValue = (prefix: string): string | undefined => {
-			if (raw === prefix && parts[i + 1]) return parts[++i].replace(/^"|"$/g, "");
-			if (raw.startsWith(`${prefix}=`)) return raw.slice(prefix.length + 1);
-			return undefined;
+		const valueFlag = (flag: string, key: keyof ParsedWorkshopCommand): boolean => {
+			if (raw === flag || raw.startsWith(`${flag}=`)) {
+				const [value, next] = takeValue(i, flag);
+				(parsed as any)[key] = value;
+				i = next;
+				return true;
+			}
+			return false;
 		};
-		const strong = readValue("--strong-model");
-		if (strong) { strongModel = strong; continue; }
-		const planner = readValue("--planner-model");
-		if (planner) { plannerModel = planner; continue; }
-		const expert = readValue("--expert-model");
-		if (expert) { expertModel = expert; continue; }
-		const junior = readValue("--junior-model");
-		if (junior) { juniorModel = junior; continue; }
-		const synth = readValue("--synth-model");
-		if (synth) { synthModel = synth; continue; }
+		if (valueFlag("--strong-model", "strongModel")) continue;
+		if (valueFlag("--planner-model", "plannerModel")) continue;
+		if (valueFlag("--expert-model", "expertModel")) continue;
+		if (valueFlag("--junior-model", "juniorModel")) continue;
+		if (valueFlag("--synth-model", "synthModel")) continue;
+
+		const boolWithOptionalValue = (flags: string[], key: keyof ParsedWorkshopCommand, value: boolean): boolean => {
+			for (const flag of flags) {
+				if (raw === flag) { setBoolean(key, value); return true; }
+				if (raw.startsWith(`${flag}=`)) { setBoolean(key, parseFlagBooleanValue(raw.slice(flag.length + 1), flag)); return true; }
+			}
+			return false;
+		};
+		if (boolWithOptionalValue(["--web-research", "--web"], "webResearch", true)) continue;
+		if (boolWithOptionalValue(["--no-web-research", "--no-web"], "webResearch", false)) continue;
+		if (boolWithOptionalValue(["--local-bash", "--bash"], "localBash", true)) continue;
+		if (boolWithOptionalValue(["--no-local-bash", "--no-bash"], "localBash", false)) continue;
+		if (boolWithOptionalValue(["--fixed-experts", "--no-plan"], "planExperts", false)) continue;
+		if (boolWithOptionalValue(["--plan"], "planExperts", true)) continue;
+		if (boolWithOptionalValue(["--keep-dashboard"], "keepDashboard", true)) continue;
+		if (boolWithOptionalValue(["--no-keep-dashboard"], "keepDashboard", false)) continue;
+		if (boolWithOptionalValue(["--observatory", "--open-observatory", "--inspect"], "openObservatory", true)) continue;
+		if (boolWithOptionalValue(["--no-observatory", "--no-open-observatory", "--no-inspect"], "openObservatory", false)) continue;
+		if (boolWithOptionalValue(["--subagents", "--briefs"], "subagents", true)) continue;
+		if (boolWithOptionalValue(["--no-subagents", "--no-briefs"], "subagents", false)) continue;
+		if (boolWithOptionalValue(["--expert-subagents", "--allow-expert-subagents"], "expertSubagents", true)) continue;
+		if (boolWithOptionalValue(["--no-expert-subagents", "--no-allow-expert-subagents"], "expertSubagents", false)) continue;
+		if (boolWithOptionalValue(["--prototype", "--prototypes", "--prototyping"], "prototyping", true)) continue;
+		if (boolWithOptionalValue(["--no-prototype", "--no-prototypes", "--no-prototyping"], "prototyping", false)) continue;
+		if (boolWithOptionalValue(["--html-report", "--report"], "htmlReport", true)) continue;
+		if (boolWithOptionalValue(["--no-html-report", "--no-report"], "htmlReport", false)) continue;
+		if (boolWithOptionalValue(["--workshop", "--rlm"], "workshop", true)) continue;
+		if (boolWithOptionalValue(["--no-workshop", "--no-rlm"], "workshop", false)) continue;
+		if (boolWithOptionalValue(["--check"], "check", true)) continue;
+		if (raw.startsWith("--")) throw new Error(`Unknown /workshop flag: ${raw}`);
 		ideaParts.push(raw);
 	}
-	return { idea: ideaParts.join(" ").trim(), rounds, profile, research, planExperts, subagents, expertSubagents, prototyping, htmlReport, workshop, strongModel, plannerModel, expertModel, juniorModel, synthModel, keepDashboard };
+	parsed.idea = ideaParts.join(" ").trim();
+	return parsed;
+}
+
+function sanitizePublicWorkshopParams(params: PublicWorkshopInput): WorkshopInput {
+	if (params.profile && params.profile !== "safe") {
+		throw new Error("Assistant-invoked workshop may only use the non-privileged 'safe' profile. Use /workshop for privileged profiles.");
+	}
+	return definedOnly({
+		idea: params.idea,
+		rounds: params.rounds,
+		profile: params.profile,
+		experts: params.experts?.map((expert) => ({ name: expert.name, stance: expert.stance })),
+		contextPaths: params.contextPaths,
+		interactive: params.interactive,
+		webResearch: params.webResearch,
+		planExperts: params.planExperts,
+		subagents: params.subagents,
+		htmlReport: params.htmlReport,
+		localBash: false,
+		expertSubagents: false,
+		prototyping: false,
+		workshop: false,
+	}) as WorkshopInput;
+}
+
+function modelExists(ctx: any, ref: string | undefined): boolean {
+	if (!ref) return true;
+	const [provider, ...rest] = ref.split("/");
+	const id = rest.join("/");
+	if (!provider || !id) return true;
+	try { return Boolean(ctx?.modelRegistry?.find?.(provider, id)); } catch (error) { logWarn(`modelExists(${ref})`, error); return false; }
+}
+
+async function preflightWorkshop(pi: ExtensionAPI, ctx: any, params: WorkshopInput): Promise<{ ok: boolean; critical: string[]; warnings: string[]; content: string }> {
+	const resolved = await resolveWorkshopConfig(resolveMaybe(ctx.cwd, params.cwd ?? "."), params);
+	const resolvedParams = resolved.params;
+	const webResearch = Boolean(resolvedParams.webResearch);
+	const localBash = Boolean(resolvedParams.localBash);
+	const allTools = new Set((pi.getAllTools?.() ?? []).map((tool: any) => String(tool.name)));
+	const critical: string[] = [];
+	const warnings: string[] = [];
+	for (const tool of DEFAULT_TOOLS.split(",")) if (!allTools.has(tool)) warnings.push(`Built-in read/search tool not visible in parent: ${tool}`);
+	if (webResearch) {
+		for (const tool of WEB_RESEARCH_TOOLS.split(",")) if (!allTools.has(tool)) critical.push(`webResearch requested but tool is unavailable: ${tool}`);
+	}
+	if ((resolvedParams.subagents || resolvedParams.expertSubagents) && !allTools.has("subagent")) critical.push("subagents requested but the subagent tool is unavailable");
+	if (localBash && !allTools.has("bash")) critical.push("localBash requested but bash tool is unavailable");
+	for (const model of [resolvedParams.strongModel, resolvedParams.plannerModel, resolvedParams.expertModel, resolvedParams.juniorModel, resolvedParams.synthModel]) {
+		if (!modelExists(ctx, model)) warnings.push(`Configured model was not found in the current model registry: ${model}`);
+	}
+	const workshopsRoot = path.join(resolveMaybe(ctx.cwd, resolvedParams.cwd ?? "."), ".pi", "workshops");
+	try {
+		await fs.mkdir(workshopsRoot, { recursive: true });
+		await fs.access(workshopsRoot, fssync.constants.W_OK);
+	} catch (error) {
+		critical.push(`Cannot write workshop artifacts under ${workshopsRoot}: ${String((error as Error)?.message ?? error)}`);
+	}
+	const content = [
+		"# Pi workshop doctor",
+		"",
+		`Extension version: ${EXTENSION_VERSION}`,
+		`Profile: ${resolved.profile ?? "none"}`,
+		`Config files: ${resolved.configPaths.length ? resolved.configPaths.join(", ") : "built-in defaults only"}`,
+		`Web research: ${webResearch ? "enabled" : "disabled"}`,
+		`Local bash: ${localBash ? "enabled" : "disabled"}`,
+		`Subagents: ${resolvedParams.subagents ? "parent briefs" : "off"}; expert direct: ${resolvedParams.expertSubagents ? "enabled" : "disabled"}`,
+		`Prototyping: ${resolvedParams.prototyping ? "enabled (artifact-contained, not sandboxed)" : "disabled"}`,
+		"",
+		"## Critical",
+		...(critical.length ? critical.map((item) => `- ${item}`) : ["- none"]),
+		"",
+		"## Warnings",
+		...(warnings.length ? warnings.map((item) => `- ${item}`) : ["- none"]),
+		"",
+		"## Tool availability",
+		...[...new Set([...DEFAULT_TOOLS.split(","), ...WEB_RESEARCH_TOOLS.split(","), "bash", "subagent", PROTOTYPE_TOOL])].map((tool) => `- ${tool}: ${allTools.has(tool) ? "ok" : "missing"}`),
+	].join("\n");
+	return { ok: critical.length === 0, critical, warnings, content };
 }
 
 export default function piWorkshop(pi: ExtensionAPI) {
+	let activeWorkshop: { controller: AbortController; startedAt: number; label: string } | undefined;
+	let latestDashboard: DashboardState | undefined;
+	let observatoryRefresh: (() => void) | undefined;
+
 	pi.registerMessageRenderer("pi-workshop", (message, _options, _theme) => {
 		return new Markdown(String(message.content ?? ""), 0, 0, getMarkdownTheme());
 	});
@@ -1686,14 +2305,15 @@ export default function piWorkshop(pi: ExtensionAPI) {
 		name: PROTOTYPE_TOOL,
 		label: "Workshop Scratchpad",
 		description:
-			"Create/run small throwaway prototype experiments for a workshop expert inside the workshop artifact directory. Enforces all files stay under <workshopDir>/scratch/<expertName> and records command output for the final report.",
-		promptSnippet: "Run isolated scratch/prototype code experiments for pi-workshop and save outputs as artifacts.",
+			"Create/run small throwaway prototype experiments for a workshop expert inside an active workshop artifact directory. Requires the per-run nonce from the workshop prompt. This is artifact-contained, not a security sandbox.",
+		promptSnippet: "Run scratch/prototype code experiments for pi-workshop and save outputs as artifacts; requires an active-workshop nonce.",
 		promptGuidelines: [
-			"Use workshop_scratch only when workshop prompts provide a workshopDir; keep experiments small, cite artifact paths, and do not use it for project mutations.",
+			"Use workshop_scratch only when workshop prompts provide a workshopDir and nonce; it is artifact-contained, not sandboxed, so keep experiments small and do not use it for project mutations.",
 		],
 		parameters: Type.Object({
 			workshopDir: Type.String({ description: "Absolute or cwd-relative .pi/workshops/<run> artifact directory" }),
 			expertName: Type.String({ description: "Expert lane/name using this scratchpad" }),
+			nonce: Type.String({ description: "Per-run scratch nonce supplied in the workshop expert prompt" }),
 			label: Type.Optional(Type.String({ description: "Short label for this run, e.g. timing-check or parser-prototype" })),
 			files: Type.Optional(Type.Array(Type.Object({
 				path: Type.String({ description: "Relative path under this expert's scratch directory" }),
@@ -1714,16 +2334,33 @@ export default function piWorkshop(pi: ExtensionAPI) {
 				timeoutSeconds = Math.max(1, timeoutSeconds);
 			}
 			const workshopDir = resolveMaybe(ctx.cwd, params.workshopDir);
-			if (!workshopDir.includes(`${path.sep}.pi${path.sep}workshops${path.sep}`)) {
-				throw new Error("workshopDir must point inside a .pi/workshops run directory");
+			if (!fssync.existsSync(workshopDir)) throw new Error("workshopDir does not exist");
+			const realWorkshopDir = await fs.realpath(workshopDir);
+			if (!realWorkshopDir.includes(`${path.sep}.pi${path.sep}workshops${path.sep}`)) {
+				throw new Error("workshopDir must point inside a real .pi/workshops run directory");
 			}
-			const scratchRoot = path.join(workshopDir, "scratch", safeSegment(params.expertName));
+			const policy = await readScratchPolicy(realWorkshopDir);
+			if (params.nonce !== policy.nonce) throw new Error("Invalid workshop_scratch nonce for this run");
+			if (Date.now() > Date.parse(policy.expiresAt)) throw new Error("Workshop scratch policy has expired");
+			const expertSegment = safeSegment(params.expertName);
+			if (!policy.allowedExperts.includes(expertSegment)) throw new Error(`Expert ${params.expertName} is not allowed by this workshop scratch policy`);
+			const scratchRoot = path.join(realWorkshopDir, "scratch", expertSegment);
 			await fs.mkdir(scratchRoot, { recursive: true });
+			await assertRealInside(realWorkshopDir, scratchRoot);
+			const realScratchRoot = await fs.realpath(scratchRoot);
 			const writtenFiles: string[] = [];
+			let totalInputBytes = 0;
 			for (const file of params.files ?? []) {
 				if (path.isAbsolute(file.path)) throw new Error(`Scratch file path must be relative: ${file.path}`);
-				const target = path.resolve(scratchRoot, file.path);
-				assertInside(scratchRoot, target);
+				if ((params.files?.length ?? 0) > 20) throw new Error("Too many scratch files requested; limit is 20");
+				totalInputBytes += Buffer.byteLength(file.content);
+				if (totalInputBytes > 256 * 1024) throw new Error("Scratch input files exceed 256KB total limit");
+				const target = path.resolve(realScratchRoot, file.path);
+				assertInside(realScratchRoot, target);
+				await fs.mkdir(path.dirname(target), { recursive: true });
+				await assertRealInside(realScratchRoot, path.dirname(target));
+				const existing = await fs.lstat(target).catch(() => undefined);
+				if (existing?.isSymbolicLink()) throw new Error(`Refusing to overwrite symlink scratch file: ${file.path}`);
 				await writeFileQueued(target, file.content);
 				writtenFiles.push(target);
 			}
@@ -1731,26 +2368,35 @@ export default function piWorkshop(pi: ExtensionAPI) {
 			let stderr = "";
 			let code: number | undefined;
 			let killed: boolean | undefined;
+			let execError: string | undefined;
 			if (params.command?.trim()) {
-				const run = await pi.exec("bash", ["-lc", params.command], {
-					cwd: scratchRoot,
-					signal,
-					timeout: timeoutSeconds * 1000,
-				});
-				stdout = run.stdout ?? "";
-				stderr = run.stderr ?? "";
-				code = run.code;
-				killed = run.killed;
+				try {
+					const run = await pi.exec("bash", ["-lc", params.command], {
+						cwd: realScratchRoot,
+						signal,
+						timeout: timeoutSeconds * 1000,
+					});
+					stdout = run.stdout ?? "";
+					stderr = run.stderr ?? "";
+					code = run.code;
+					killed = run.killed;
+				} catch (error) {
+					execError = String((error as Error)?.message ?? error);
+					stderr += `\n${execError}`;
+					code = 1;
+				}
 			}
 			const label = safeSegment(params.label ?? params.command?.split("\n")[0] ?? "scratch-run");
-			const artifactPath = path.join(scratchRoot, `${timestampSlug()}-${label}.md`);
+			const artifactPath = path.join(realScratchRoot, `${timestampSlug()}-${label}.md`);
 			const outTrunc = truncateHead(stdout, { maxBytes: 20 * 1024, maxLines: 500 });
 			const errTrunc = truncateHead(stderr, { maxBytes: 10 * 1024, maxLines: 300 });
 			const artifact = [
 				`# Scratch run: ${params.label ?? label}`,
 				``,
+				`> Safety note: workshop_scratch is artifact-contained, not sandboxed. The command ran as the local user from the scratch directory.`,
+				``,
 				`Expert: ${params.expertName}`,
-				`Directory: ${scratchRoot}`,
+				`Directory: ${realScratchRoot}`,
 				`Timeout: ${timeoutSeconds}s`,
 				``,
 				`## Files written`,
@@ -1760,7 +2406,7 @@ export default function piWorkshop(pi: ExtensionAPI) {
 				"```bash",
 				params.command ?? "(none)",
 				"```",
-				`Exit code: ${code ?? "not run"}${killed ? " (killed/timeout)" : ""}`,
+				`Exit code: ${code ?? "not run"}${killed ? " (killed/timeout)" : ""}${execError ? ` (error: ${execError})` : ""}`,
 				``,
 				`## stdout`,
 				"```text",
@@ -1776,10 +2422,11 @@ export default function piWorkshop(pi: ExtensionAPI) {
 			].join("\n");
 			await writeFileQueued(artifactPath, artifact);
 			return {
-				content: [{ type: "text", text: `Scratch artifact: ${artifactPath}\nExit code: ${code ?? "not run"}\n\nstdout:\n${outTrunc.content || "(empty)"}\n\nstderr:\n${errTrunc.content || "(empty)"}` }],
-				details: { scratchRoot, artifactPath, writtenFiles, code, killed, stdoutBytes: Buffer.byteLength(stdout), stderrBytes: Buffer.byteLength(stderr) },
+				content: [{ type: "text", text: `Scratch artifact: ${artifactPath}\nSafety: artifact-contained, not sandboxed.\nExit code: ${code ?? "not run"}\n\nstdout:\n${outTrunc.content || "(empty)"}\n\nstderr:\n${errTrunc.content || "(empty)"}` }],
+				details: { scratchRoot: realScratchRoot, artifactPath, writtenFiles, code, killed, stdoutBytes: Buffer.byteLength(stdout), stderrBytes: Buffer.byteLength(stderr), artifactContainedNotSandboxed: true },
 			};
 		},
+
 		renderCall(args, theme) {
 			return new Text(theme.fg("toolTitle", theme.bold("workshop_scratch ")) + theme.fg("accent", args.expertName ?? "expert") + "\n" + theme.fg("dim", args.label ?? args.command ?? "scratch run"), 0, 0);
 		},
@@ -1798,13 +2445,32 @@ export default function piWorkshop(pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Use workshop when the user asks to ideate, stress-test, grill, or resolve a technical idea with multiple expert viewpoints.",
 			"workshop can improve an idea, conclude it needs iteration, reject it, or declare it too poorly posed to proceed.",
-			"Set workshop=true or profile='workshop' when the user wants RLM-style recursive delegation, expert subagent calls, executable scratch prototypes, background research, and an HTML report of evidence.",
+			"Assistant-invoked workshop is restricted: it may use webResearch and parent-run briefs, but cannot grant bash, direct expert subagents, prototyping, cwd, outputDir, custom tools, or privileged workshop profiles. Tell the user to use /workshop for privileged modes.",
 		],
-		parameters: WorkshopParams,
+		parameters: PublicWorkshopParams,
+		prepareArguments(args) {
+			if (!args || typeof args !== "object") return args;
+			const input = args as Record<string, unknown>;
+			return definedOnly({
+				idea: input.idea,
+				rounds: input.rounds,
+				profile: input.profile,
+				experts: Array.isArray(input.experts) ? input.experts.map((expert: any) => ({ name: expert?.name, stance: expert?.stance })) : undefined,
+				contextPaths: input.contextPaths,
+				interactive: input.interactive,
+				webResearch: input.webResearch,
+				planExperts: input.planExperts,
+				subagents: input.subagents,
+				htmlReport: input.htmlReport,
+			});
+		},
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+			const safeParams = sanitizePublicWorkshopParams(params as PublicWorkshopInput);
+			const preflight = await preflightWorkshop(pi, ctx, safeParams);
+			if (!preflight.ok) throw new Error(`workshop preflight failed:\n${preflight.critical.join("\n")}`);
 			const result = await runWorkshop(
 				pi,
-				params,
+				safeParams,
 				ctx,
 				signal,
 				onUpdate ? (text) => onUpdate({ content: [{ type: "text", text }], details: { phase: text } }) : undefined,
@@ -1843,7 +2509,15 @@ export default function piWorkshop(pi: ExtensionAPI) {
 	});
 
 	const runWorkshopCommand = async (args: string, ctx: any) => {
-		const parsed = parseWorkshopCommand(args);
+		let parsed: ParsedWorkshopCommand;
+		try {
+			parsed = parseWorkshopCommand(args);
+		} catch (error) {
+			const message = `Workshop flag error: ${String((error as Error)?.message ?? error)}`;
+			ctx.ui.notify(message, "error");
+			pi.sendMessage({ customType: "pi-workshop", content: `# ${message}`, display: true, details: { error: message } });
+			return;
+		}
 		let idea = parsed.idea;
 		if (!idea) {
 			if (!ctx.hasUI) {
@@ -1852,7 +2526,7 @@ export default function piWorkshop(pi: ExtensionAPI) {
 			}
 			const edited = await ctx.ui.editor(
 				"Technical idea for workshop",
-				"Paste proposal / PRD excerpt / architecture here...\n\nFlags: --workshop --profile workshop --rounds 4 --research --subagents --expert-subagents --prototype --html-report --fixed-experts",
+				"Paste proposal / PRD excerpt / architecture here...\n\nFlags: --workshop --profile workshop --rounds 4 --web-research --local-bash --subagents --expert-subagents --prototype --html-report --fixed-experts",
 			);
 			idea = edited?.trim() ?? "";
 		}
@@ -1860,15 +2534,35 @@ export default function piWorkshop(pi: ExtensionAPI) {
 			ctx.ui.notify("Workshop canceled: no idea provided", "warning");
 			return;
 		}
+		const params = { ...parsed, idea, interactive: true };
+		let preflight;
+		let resolvedForUi;
+		try {
+			preflight = await preflightWorkshop(pi, ctx, params);
+			resolvedForUi = await resolveWorkshopConfig(ctx.cwd, params);
+		} catch (error) {
+			const message = `Workshop preflight/config error: ${String((error as Error)?.message ?? error)}`;
+			pi.sendMessage({ customType: "pi-workshop", content: `# ${message}`, display: true, details: { error: message } });
+			return;
+		}
+		if (!preflight.ok) {
+			pi.sendMessage({ customType: "pi-workshop", content: `${preflight.content}\n\n/workshop blocked by critical preflight failures.`, display: true, details: preflight });
+			return;
+		}
+		const keepDashboard = Boolean(resolvedForUi.params.keepDashboard);
 		const dashboard = createDashboardState();
+		latestDashboard = dashboard;
 		if (ctx.hasUI) installDashboardWidget(ctx, dashboard);
+		if (ctx.hasUI && resolvedForUi.params.openObservatory) launchWorkshopObservatory(ctx, dashboard, (requestRender) => { observatoryRefresh = requestRender; });
 		ctx.ui.setStatus("pi-workshop", "workshop starting...");
+		const controller = new AbortController();
+		activeWorkshop = { controller, startedAt: Date.now(), label: idea.slice(0, 80) };
 		try {
 			const result = await runWorkshop(
 				pi,
-				{ ...parsed, idea, interactive: true },
+				params,
 				ctx,
-				undefined,
+				controller.signal,
 				(text) => ctx.ui.setStatus("pi-workshop", text),
 				(artifact) => {
 					const title = artifact.kind === "critique" ? `# Round ${artifact.round}: ${artifact.name} critique` : `# Round ${artifact.round}: synthesis`;
@@ -1881,24 +2575,45 @@ export default function piWorkshop(pi: ExtensionAPI) {
 				},
 				(event) => {
 					updateDashboardState(dashboard, event);
+					observatoryRefresh?.();
 					if (ctx.hasUI) installDashboardWidget(ctx, dashboard);
 				},
 			);
 			pi.sendMessage({ customType: "pi-workshop", content: result.summary, display: true, details: result });
+		} catch (error) {
+			pi.sendMessage({ customType: "pi-workshop", content: `# Workshop failed\n\n${String((error as Error)?.stack ?? error)}`, display: true, details: { error: String((error as Error)?.message ?? error) } });
 		} finally {
+			if (activeWorkshop?.controller === controller) activeWorkshop = undefined;
 			ctx.ui.setStatus("pi-workshop", undefined);
-			if (!parsed.keepDashboard) ctx.ui.setWidget("pi-workshop-dashboard", undefined);
+			if (!keepDashboard) ctx.ui.setWidget("pi-workshop-dashboard", undefined);
 		}
 	};
 
 	pi.registerCommand("workshop-config", {
-		description: "Show resolved pi-workshop config. Usage: /workshop-config [--profile workshop]",
+		description: "Show resolved pi-workshop config. Usage: /workshop-config [--profile workshop] [--check]",
 		handler: async (args, ctx) => {
-			const parsed = parseWorkshopCommand(args);
-			const resolved = await resolveWorkshopConfig(ctx.cwd, { ...parsed, idea: "config preview" });
+			let parsed: ParsedWorkshopCommand;
+			try {
+				parsed = parseWorkshopCommand(args);
+			} catch (error) {
+				const message = `Workshop config flag error: ${String((error as Error)?.message ?? error)}`;
+				ctx.ui.notify(message, "error");
+				pi.sendMessage({ customType: "pi-workshop", content: `# ${message}`, display: true, details: { error: message } });
+				return;
+			}
+			const { check: _check, ...configPreviewParams } = parsed;
+			let resolved: ResolvedWorkshopConfig;
+			try {
+				resolved = await resolveWorkshopConfig(ctx.cwd, { ...configPreviewParams, idea: "config preview" });
+			} catch (error) {
+				const message = `Workshop config error: ${String((error as Error)?.message ?? error)}`;
+				pi.sendMessage({ customType: "pi-workshop", content: `# ${message}`, display: true, details: { error: message } });
+				return;
+			}
 			const content = [
-				"# Pi workshop config",
+				parsed.check ? "# Pi workshop config check" : "# Pi workshop config",
 				"",
+				parsed.check ? "Config validation: **ok**" : "",
 				`Config files: ${resolved.configPaths.length ? resolved.configPaths.join(", ") : "built-in defaults only"}`,
 				`Profile: ${resolved.profile ?? "none"}`,
 				"",
@@ -1922,8 +2637,41 @@ export default function piWorkshop(pi: ExtensionAPI) {
 
 	pi.registerCommand("workshop", {
 		description:
-			"Run a recursive expert workshop. Usage: /workshop [--profile workshop] [--rounds 4] [--research] [--subagents] [--expert-subagents] [--prototype] [--html-report] [--fixed-experts] <idea>",
+			"Run a recursive expert workshop. Usage: /workshop [--profile workshop] [--rounds 4] [--web-research] [--local-bash] [--subagents] [--expert-subagents] [--prototype] [--html-report] [--fixed-experts] <idea>",
 		handler: async (args, ctx) => runWorkshopCommand(args, ctx),
+	});
+
+	pi.registerCommand("workshop-cancel", {
+		description: "Cancel the active /workshop run and write CANCELLED artifacts",
+		handler: async (_args, ctx) => {
+			if (!activeWorkshop) {
+				ctx.ui.notify("No active workshop run to cancel", "warning");
+				return;
+			}
+			activeWorkshop.controller.abort();
+			ctx.ui.notify(`Cancelling workshop: ${activeWorkshop.label}`, "warning");
+		},
+	});
+
+	pi.registerCommand("workshop-doctor", {
+		description: "Preflight pi-workshop tools, models, config, and artifact permissions. Usage: /workshop-doctor [same flags as /workshop]",
+		handler: async (args, ctx) => {
+			let parsed: ParsedWorkshopCommand;
+			try { parsed = parseWorkshopCommand(args); }
+			catch (error) {
+				const message = `Workshop doctor flag error: ${String((error as Error)?.message ?? error)}`;
+				ctx.ui.notify(message, "error");
+				pi.sendMessage({ customType: "pi-workshop", content: `# ${message}`, display: true, details: { error: message } });
+				return;
+			}
+			try {
+				const report = await preflightWorkshop(pi, ctx, { ...parsed, idea: parsed.idea || "doctor" });
+				pi.sendMessage({ customType: "pi-workshop", content: report.content, display: true, details: report });
+			} catch (error) {
+				const message = `Workshop doctor error: ${String((error as Error)?.message ?? error)}`;
+				pi.sendMessage({ customType: "pi-workshop", content: `# ${message}`, display: true, details: { error: message } });
+			}
+		},
 	});
 
 	pi.registerCommand("workshop-hide", {
@@ -1932,6 +2680,16 @@ export default function piWorkshop(pi: ExtensionAPI) {
 			ctx.ui.setWidget("pi-workshop-dashboard", undefined);
 			ctx.ui.notify("Workshop observatory hidden", "info");
 		},
+	});
+
+	pi.registerCommand("workshop-observatory", {
+		description: "Open a navigable inspector for the active/latest workshop: experts, subagents, tool events, and downloaded files",
+		handler: async (_args, ctx) => openWorkshopObservatory(ctx, latestDashboard, (requestRender) => { observatoryRefresh = requestRender; }),
+	});
+
+	pi.registerShortcut(Key.ctrlAlt("w"), {
+		description: "Open workshop observatory navigator",
+		handler: async (ctx) => openWorkshopObservatory(ctx, latestDashboard, (requestRender) => { observatoryRefresh = requestRender; }),
 	});
 
 	pi.registerCommand("workshop-sessions", {
@@ -1960,9 +2718,16 @@ export default function piWorkshop(pi: ExtensionAPI) {
 
 	pi.registerCommand("workshop-pickup", {
 		description:
-			"Continue from a previous workshop session. Usage: /workshop-pickup [--rounds 2] [--research] [optional session-dir or instructions]",
+			"Continue from a previous workshop session. Usage: /workshop-pickup [--rounds 2] [--web-research] [optional session-dir or instructions]",
 		handler: async (args, ctx) => {
-			const parsed = parseWorkshopCommand(args);
+			let parsed: ParsedWorkshopCommand;
+			try { parsed = parseWorkshopCommand(args); }
+			catch (error) {
+				const message = `Workshop pickup flag error: ${String((error as Error)?.message ?? error)}`;
+				ctx.ui.notify(message, "error");
+				pi.sendMessage({ customType: "pi-workshop", content: `# ${message}`, display: true, details: { error: message } });
+				return;
+			}
 			let targetDir: string | undefined;
 			let extraInstructions = parsed.idea;
 			if (parsed.idea) {
@@ -1998,20 +2763,40 @@ export default function piWorkshop(pi: ExtensionAPI) {
 			}
 
 			const idea = `Continue this previous workshop ideation session.\n\nPrevious session dir: ${targetDir}\nPrevious resolution:\n\n${previousResolution}\n\nUser continuation instructions:\n${extraInstructions || "Continue from remaining open questions and produce a sharper next resolution."}`;
+			const pickupParams = {
+				...parsed,
+				idea,
+				interactive: true,
+				contextPaths: [resolutionPath, transcriptPath].filter((p) => fssync.existsSync(p)),
+			};
+			let preflight;
+			let resolvedForUi;
+			try {
+				preflight = await preflightWorkshop(pi, ctx, pickupParams);
+				resolvedForUi = await resolveWorkshopConfig(ctx.cwd, pickupParams);
+			} catch (error) {
+				const message = `Workshop pickup preflight/config error: ${String((error as Error)?.message ?? error)}`;
+				pi.sendMessage({ customType: "pi-workshop", content: `# ${message}`, display: true, details: { error: message } });
+				return;
+			}
+			if (!preflight.ok) {
+				pi.sendMessage({ customType: "pi-workshop", content: `${preflight.content}\n\n/workshop-pickup blocked by critical preflight failures.`, display: true, details: preflight });
+				return;
+			}
+			const keepDashboard = Boolean(resolvedForUi.params.keepDashboard);
 			const dashboard = createDashboardState();
+			latestDashboard = dashboard;
 			if (ctx.hasUI) installDashboardWidget(ctx, dashboard);
+			if (ctx.hasUI && resolvedForUi.params.openObservatory) launchWorkshopObservatory(ctx, dashboard, (requestRender) => { observatoryRefresh = requestRender; });
 			ctx.ui.setStatus("pi-workshop", "picking up previous session...");
+			const controller = new AbortController();
+			activeWorkshop = { controller, startedAt: Date.now(), label: `pickup ${path.basename(targetDir)}` };
 			try {
 				const result = await runWorkshop(
 					pi,
-					{
-						...parsed,
-						idea,
-						interactive: true,
-						contextPaths: [resolutionPath, transcriptPath].filter((p) => fssync.existsSync(p)),
-					},
+					pickupParams,
 					ctx,
-					undefined,
+					controller.signal,
 					(text) => ctx.ui.setStatus("pi-workshop", text),
 					(artifact) => {
 						const title = artifact.kind === "critique" ? `# Round ${artifact.round}: ${artifact.name} critique` : `# Round ${artifact.round}: synthesis`;
@@ -2024,13 +2809,17 @@ export default function piWorkshop(pi: ExtensionAPI) {
 					},
 					(event) => {
 						updateDashboardState(dashboard, event);
+						observatoryRefresh?.();
 						if (ctx.hasUI) installDashboardWidget(ctx, dashboard);
 					},
 				);
 				pi.sendMessage({ customType: "pi-workshop", content: result.summary, display: true, details: result });
+			} catch (error) {
+				pi.sendMessage({ customType: "pi-workshop", content: `# Workshop pickup failed\n\n${String((error as Error)?.stack ?? error)}`, display: true, details: { error: String((error as Error)?.message ?? error) } });
 			} finally {
+				if (activeWorkshop?.controller === controller) activeWorkshop = undefined;
 				ctx.ui.setStatus("pi-workshop", undefined);
-				if (!parsed.keepDashboard) ctx.ui.setWidget("pi-workshop-dashboard", undefined);
+				if (!keepDashboard) ctx.ui.setWidget("pi-workshop-dashboard", undefined);
 			}
 		},
 	});
