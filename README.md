@@ -135,7 +135,17 @@ User-question rounds now open a full-screen **Workshop Q&A** surface. Select a q
 
 ## HTML reports
 
-`--html-report` writes a polished self-contained `report.html`. The synthesizer is scaffolded to produce a report brief, and the HTML report renders an executive summary, direction-of-discussion narrative, human-intervention checklist, round-by-round discussion arc, final conclusions/action plan, child-run trust ledger, scratch evidence, and raw artifact archive. `DEGRADED` reports explicitly call out failed/blank child runs and recommend pickup from the last reliable synthesis.
+`--html-report` writes a polished self-contained `report.html`. The synthesizer emits a structured `\`\`\`report-brief` fenced block in `resolution.md` containing: idea title, Why/How/What abstract, direction, conclusion, what changed, intervention, confidence, next action, and optional prior-art links. The HTML report renders:
+
+- **Hero** — idea title + colorblind-safe status badge, Why/How/What three-card abstract, convergence strip (verdict · rounds · experts · converged), expert verdict strip with per-expert chips that scroll to detail cards, and a copyable `/workshop-pickup` command (ITERATE/REJECT/DEGRADED only)
+- **Intervention** — blocking concern callout + decisions-needed list + pickup command (conditional: ITERATE, REJECT, DEGRADED only; hidden on ACCEPT)
+- **Panel** — expert convergence table (rows = experts, columns = per-round verdicts), expert detail cards with key concerns and full per-round critique in a collapsed `<details>`
+- **Round arc** — collapsible per-round cards (what panel agreed on / what shifted / what remained open), sourced from synthesizer voice
+- **Prior art** — web-research-conditional section with project cards and hyperlinks; hidden entirely when absent
+- **Evidence ledger** — two-tab view: Summary (what each expert thought about the idea, opinion-first) and Details (cost, tokens, duration, model, tool calls per run)
+- **Raw artifacts** — single collapsed `<details>` containing all round files, workflow, and idea prompt rendered as readable markdown (not raw `<pre>` dumps); scratch/prototype files included when present
+
+`DEGRADED` reports show a banner callout explaining partial data and recommending pickup.
 
 ## Scratch/prototype mode
 

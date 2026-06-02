@@ -786,12 +786,25 @@ Strict output format:
 - Q: ...
 
 ## Report brief
-- Direction of discussion: one sentence explaining whether the workshop moved the idea toward acceptance, iteration, rejection, or clarification, and why.
-- Final conclusion: one sentence a busy human can act on without reading the raw transcript.
-- What changed from the original idea: one sentence naming the most important refinement, constraint, or reversal.
-- Human intervention required: yes/no plus the specific decision, evidence, rerun, or repair needed.
-- Confidence / evidence quality: one sentence about strength of evidence, missing evidence, tool/prototype reliability, or degraded-run caveats.
-- Next recommended action: one concrete next step.
+
+Emit the structured block below. Every field is required. Be specific — a reader who did not attend the workshop must be able to act on this block alone.
+
+\`\`\`report-brief
+title: [idea title in ≤8 words — name the thing, not the verdict]
+why: [2–3 sentences: why this question matters; what motivated the workshop]
+how: [2–3 sentences: how the panel approached it; which expert stances were brought to bear]
+what: [2–3 sentences: what was decided or discovered; the net change from the original framing]
+direction: [one sentence: did the workshop move the idea toward acceptance, iteration, rejection, or clarification, and why]
+conclusion: [one sentence a busy human can act on without reading the raw transcript]
+changed: [one sentence: the single most important refinement, constraint, or reversal]
+intervention: [yes/no plus the specific decision, evidence gap, or repair needed; "none" if ACCEPT and no blockers]
+confidence: [one sentence about evidence strength, missing evidence, or degraded-run caveats]
+next_action: [one concrete next step]
+prior_art:
+  - name: [project or paper name] | url: [https://...] | description: [one sentence why it is relevant]
+\`\`\`
+
+If web research was not enabled or no relevant prior art was found, omit the prior_art lines entirely.
 
 ## Resolution
 STATUS: ACCEPT | ITERATE | REJECT | ILL_POSED | UNRESOLVED
@@ -1078,6 +1091,13 @@ type ReportArtifact = { file: string; rel: string; name: string; kind: ReportArt
 type ReportRound = { round: number; synthesis?: ReportArtifact; experts: ReportArtifact[]; briefs: ReportArtifact[] };
 
 type ReportBrief = {
+	// v2 structured fields (from ---report-brief fenced block)
+	title?: string;
+	why?: string;
+	how?: string;
+	what?: string;
+	priorArt?: Array<{ name: string; url: string; description: string }>;
+	// shared fields
 	direction?: string;
 	conclusion?: string;
 	changed?: string;
@@ -1153,7 +1173,42 @@ function reportBriefValue(section: string, label: string): string | undefined {
 	return section.match(pattern)?.[1]?.trim();
 }
 
+function parseReportBriefFencedBlock(section: string): ReportBrief | null {
+	// Extract the ```report-brief ... ``` fenced block from a section or full document
+	const fenceMatch = section.match(/^```report-brief\s*\n([\s\S]*?)^```/m);
+	if (!fenceMatch) return null;
+	const block = fenceMatch[1];
+	const get = (key: string): string | undefined => {
+		const m = block.match(new RegExp(`^${escapeRegExp(key)}:\s*(.+)$`, "im"));
+		const val = m?.[1]?.trim();
+		return val && !/^none$/i.test(val) ? val : undefined;
+	};
+	// Parse prior_art lines: `  - name: X | url: Y | description: Z`
+	const priorArt: ReportBrief["priorArt"] = [];
+	for (const line of block.split("\n")) {
+		const pa = line.match(/^\s*-\s*name:\s*(.+?)\s*\|\s*url:\s*(https?:\/\/\S+)\s*\|\s*description:\s*(.+)$/i);
+		if (pa) priorArt.push({ name: pa[1].trim(), url: pa[2].trim(), description: pa[3].trim() });
+	}
+	return {
+		title: get("title"),
+		why: get("why"),
+		how: get("how"),
+		what: get("what"),
+		priorArt: priorArt.length ? priorArt : undefined,
+		direction: get("direction"),
+		conclusion: get("conclusion"),
+		changed: get("changed"),
+		intervention: get("intervention"),
+		confidence: get("confidence"),
+		nextAction: get("next_action"),
+	};
+}
+
 function parseReportBrief(final: string): ReportBrief {
+	// Try v2 fenced block first (works on the full document, not just the section)
+	const v2 = parseReportBriefFencedBlock(final);
+	if (v2 && (v2.title || v2.direction || v2.conclusion)) return v2;
+	// Fallback: v1 bullet-list parser for backward-compat with old synthesis files
 	const section = extractMarkdownSection(final, ["Report brief", "Report-ready summary", "Executive report brief"]);
 	if (!section) return {};
 	return {
@@ -1370,6 +1425,97 @@ function renderChildRunLedger(childRuns: ChildRun[]): string {
 	return `<div class="table-wrap"><table><thead><tr><th>Child</th><th>Phase</th><th>Round</th><th>Trust</th><th>Exit</th><th>Timeout</th><th>ms</th><th>Tools</th><th>Preview</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
+// ── Report HTML helpers ──────────────────────────────────────────────────
+
+function statusBadgeClass(status: ResolutionStatus): string {
+	switch (status) {
+		case "ACCEPT": return "badge-accept";
+		case "ITERATE": return "badge-iterate";
+		case "REJECT": return "badge-reject";
+		case "DEGRADED": return "badge-degraded";
+		default: return "badge-neutral";
+	}
+}
+
+function renderHtmlBadge(text: string, cls: string): string {
+	return `<span class="badge ${escapeHtml(cls)}">${escapeHtml(text)}</span>`;
+}
+
+function renderRoundArcCard(round: ReportRound): string {
+	const synthesis = round.synthesis?.content ?? "";
+	const roundStatus = extractStatus(synthesis) ?? "UNRESOLVED";
+	const roundConverged = isConverged(synthesis);
+	const shared = extractMarkdownSection(synthesis, "Shared ground");
+	const shifted = extractMarkdownSection(synthesis, ["Resolved disagreements", "What moved", "What shifted"]);
+	const open = extractMarkdownSection(synthesis, ["Unresolved disagreements", "Still open", "What remained open"]);
+	const statusCls = statusBadgeClass(roundStatus as ResolutionStatus);
+	return `
+<div class="round-card">
+  <div class="round-header" onclick="toggleRound(this)">
+    <div class="rh-left"><span class="round-num">Round ${round.round}</span><span class="round-title">${escapeHtml(roundStatus === "ACCEPT" ? "Converging" : roundStatus === "ITERATE" ? "Iterating" : roundStatus === "REJECT" ? "Rejecting" : "In progress")}</span></div>
+    <div style="display:flex;align-items:center;gap:8px">${renderHtmlBadge(roundStatus, statusCls)}${roundConverged ? renderHtmlBadge("converged", "badge-accept") : ""}<span class="round-chevron">▼</span></div>
+  </div>
+  <div class="round-body">
+    <div class="round-cols">
+      <div class="round-col"><div class="round-col-label">What the panel agreed on</div>${renderMarkdownLite(shared, "No shared ground recorded.")}</div>
+      <div class="round-col"><div class="round-col-label">What shifted this round</div>${renderMarkdownLite(shifted, "No shift recorded.")}</div>
+      <div class="round-col"><div class="round-col-label">What remained open</div>${renderMarkdownLite(open, "Nothing left open.")}</div>
+    </div>
+    ${round.experts.length ? `<details class="artifact-item" style="margin-top:12px"><summary><span>Expert positions this round (${round.experts.length})</span></summary><div class="artifact-content">${round.experts.map((e) => renderExpertCard(e)).join("\n")}</div></details>` : ""}
+    ${round.synthesis ? `<details class="artifact-item" style="margin-top:8px"><summary><span>Full synthesis</span><span class="artifact-filename">${escapeHtml(round.synthesis.rel)}</span></summary><div class="artifact-content">${renderMarkdownLite(round.synthesis.content)}</div></details>` : ""}
+  </div>
+</div>`;
+}
+
+function renderLedgerSummaryRow(run: ChildRun): string {
+	if (run.phase === "planner" || run.phase === "assistant_brief") return "";
+	const verdict = extractVerdict(run.text) ?? (run.exitCode === 0 ? "—" : "FAILED");
+	const opinion = firstMeaningfulLine(run.text, 220);
+	const badgeCls = verdict === "ACCEPT" ? "badge-accept" : verdict === "ITERATE" ? "badge-iterate" : verdict === "REJECT" ? "badge-reject" : "badge-neutral";
+	return `<div class="ledger-summary-item">
+  <div><div class="lsi-expert">${escapeHtml(reportDisplayName(run.name))}</div><div class="lsi-round">${run.phase ?? "expert"} · ${run.round ? `Round ${run.round}` : "—"}</div></div>
+  <div class="lsi-opinion">${escapeHtml(opinion)}</div>
+  ${renderHtmlBadge(verdict, badgeCls)}
+</div>`;
+}
+
+function renderLedgerDetailsRow(run: ChildRun): string {
+	const ok = run.exitCode === 0 && !run.timedOut && !run.aborted && run.text.trim();
+	const statusText = run.timedOut ? "⚠ timeout" : run.aborted ? "⚠ aborted" : run.exitCode !== 0 ? "✗ failed" : "✓ ok";
+	const dur = run.durationMs != null ? (run.durationMs < 60000 ? `${Math.round(run.durationMs / 1000)}s` : `${Math.floor(run.durationMs / 60000)}m ${Math.round((run.durationMs % 60000) / 1000)}s`) : "—";
+	const cost = run.usage?.cost != null ? `$${run.usage.cost.toFixed(3)}` : "—";
+	const inp = run.usage?.input != null ? run.usage.input.toLocaleString() : "—";
+	const out = run.usage?.output != null ? run.usage.output.toLocaleString() : "—";
+	return `<tr>
+  <td><strong>${escapeHtml(reportDisplayName(run.name))}</strong></td>
+  <td><span class="badge badge-neutral" style="font-size:10px">${escapeHtml(run.phase ?? "unknown")}</span></td>
+  <td>${escapeHtml(String(run.round ?? "—"))}</td>
+  <td style="color:${ok ? "var(--accept-fg)" : "var(--iterate-fg)"}">${escapeHtml(statusText)}</td>
+  <td>${escapeHtml(dur)}</td>
+  <td>${escapeHtml(String(run.toolEvents?.length ?? 0))}</td>
+  <td style="font-size:12px;font-family:monospace">${escapeHtml(run.model ?? "—")}</td>
+  <td>${escapeHtml(inp)}</td>
+  <td>${escapeHtml(out)}</td>
+  <td>${escapeHtml(cost)}</td>
+</tr>`;
+}
+
+function renderPriorArtSection(priorArt: ReportBrief["priorArt"]): string {
+	if (!priorArt?.length) return "";
+	const cards = priorArt.map((pa) => `
+<div class="prior-art-card">
+  <h3>${escapeHtml(pa.name)}</h3>
+  <p>${escapeHtml(pa.description)}</p>
+  <a href="${escapeHtml(pa.url)}" target="_blank" rel="noopener">${escapeHtml(pa.url)} ↗</a>
+</div>`).join("\n");
+	return `
+<section id="prior-art" aria-labelledby="prior-art-heading">
+  <h2 id="prior-art-heading">Prior art &amp; related work</h2>
+  <p style="color:var(--muted);font-size:14px;margin-bottom:16px">Similar projects found by the panel during web research.</p>
+  <div class="prior-art-cards">${cards}</div>
+</section>`;
+}
+
 async function generateHtmlReport(args: {
 	workshopDir: string;
 	ideaPath: string;
@@ -1401,7 +1547,6 @@ async function generateHtmlReport(args: {
 	const rounds = reportRounds(artifacts);
 	const reportBrief = parseReportBrief(final);
 	const status = args.result.status;
-	const tone = statusTone(status);
 	const strongest = extractMarkdownSection(final, "Strongest viable version");
 	const requiredRevision = extractMarkdownSection(final, "Required idea revision");
 	const sharedGround = extractMarkdownSection(final, "Shared ground");
@@ -1411,121 +1556,383 @@ async function generateHtmlReport(args: {
 	const errors = args.errors ?? [];
 	const childRuns = args.childRuns ?? [];
 	const failingRuns = childRuns.filter((run) => run.exitCode !== 0 || run.timedOut || run.aborted || !run.text.trim());
-	const interventions = [
-		...errors.map((error) => `Run issue: ${error}`),
-		...extractListItems(unresolvedDisagreements, 8).map((item) => `Resolve disagreement: ${item}`),
-		...openQuestions.map((question) => `Answer open question: ${question}`),
-		...(status === "ITERATE" ? extractListItems(requiredRevision, 8).map((item) => `Apply required revision: ${item}`) : []),
-		...(status === "DEGRADED" ? ["Pick up from the last reliable synthesis after inspecting failure markers."] : []),
-	];
-	const actionItems = [
-		reportBrief.nextAction,
-		...extractListItems(requiredRevision, 8),
-		...(openQuestions.length ? openQuestions.map((question) => `Decide: ${question}`) : []),
-	].filter((item): item is string => Boolean(item?.trim()));
+
+	// Derived display values — v2 fenced block first, then fallbacks
+	const title = reportBrief.title || stripMarkdownForSnippet(idea, 80) || "Workshop Report";
+	const why = reportBrief.why || "";
+	const how = reportBrief.how || "";
+	const what = reportBrief.what || "";
 	const direction = reportBrief.direction || stripMarkdownForSnippet(sharedGround || strongest || final, 360) || statusMeaning(status, args.result.converged);
 	const conclusion = reportBrief.conclusion || stripMarkdownForSnippet(strongest || requiredRevision || final, 360);
-	const changed = reportBrief.changed || stripMarkdownForSnippet(requiredRevision || resolvedDisagreements, 300) || "No explicit change-from-original section was produced.";
-	const confidence = reportBrief.confidence || (failingRuns.length ? `Lower confidence: ${failingRuns.length} child run(s) had trust issues.` : args.result.converged ? "Higher confidence: the panel converged and no child-run trust issue was recorded." : "Moderate confidence: useful synthesis exists, but convergence was not reached.");
-	const interventionLabel = reportBrief.intervention || (interventions.length ? "Yes — review the intervention list before acting." : "No blocking human intervention was identified by the report generator.");
+	const changed = reportBrief.changed || stripMarkdownForSnippet(requiredRevision || resolvedDisagreements, 300) || "No explicit change-from-original recorded.";
+	const confidence = reportBrief.confidence || (failingRuns.length ? `Lower confidence: ${failingRuns.length} child run(s) had issues.` : args.result.converged ? "Higher confidence: panel converged, no child-run trust issues." : "Moderate confidence: useful synthesis exists but convergence was not reached.");
+
+	// Intervention items
+	const interventions = [
+		...errors.map((e) => `Run issue: ${e}`),
+		...extractListItems(unresolvedDisagreements, 8).map((item) => `Resolve: ${item}`),
+		...openQuestions.map((q) => `Decide: ${q}`),
+		...(status === "ITERATE" ? extractListItems(requiredRevision, 8).map((item) => `Apply revision: ${item}`) : []),
+		...(status === "DEGRADED" ? ["Pick up from the last reliable synthesis after inspecting failure markers."] : []),
+	];
+	const nextAction = reportBrief.nextAction || defaultNextAction(status);
+	const statusCls = statusBadgeClass(status);
+	const slug = path.relative(process.cwd(), args.workshopDir);
+	const pickupCmd = `/workshop-pickup --rounds 2 ${slug}`;
+
+	// Convergence table: collect per-expert per-round verdicts from childRuns
+	const expertNames = args.result.experts;
+	const maxRound = args.result.roundsRun;
+	const verdictMap = new Map<string, Map<number, string>>();
+	for (const run of childRuns) {
+		if (run.phase !== "expert" || !run.round) continue;
+		const key = run.name;
+		if (!verdictMap.has(key)) verdictMap.set(key, new Map());
+		const v = extractVerdict(run.text);
+		if (v) verdictMap.get(key)!.set(run.round, v);
+	}
+	const convergenceTableRows = expertNames.map((name) => {
+		const rmap = verdictMap.get(name) ?? new Map<number, string>();
+		const cells = Array.from({ length: maxRound }, (_, i) => {
+			const v = rmap.get(i + 1) ?? "—";
+			const cls = v === "ACCEPT" ? "badge-accept" : v === "ITERATE" ? "badge-iterate" : v === "REJECT" ? "badge-reject" : "badge-neutral";
+			return `<td>${v === "—" ? "<span style=\"color:var(--muted)\">—</span>" : renderHtmlBadge(v, `${cls} badge-sm`)}</td>`;
+		}).join("");
+		const finalV = rmap.get(maxRound) ?? (rmap.size ? [...rmap.values()].at(-1)! : "—");
+		const finalCls = finalV === "ACCEPT" ? "badge-accept" : finalV === "ITERATE" ? "badge-iterate" : finalV === "REJECT" ? "badge-reject" : "badge-neutral";
+		return `<tr><td><strong>${escapeHtml(reportDisplayName(name))}</strong></td>${cells}<td>${renderHtmlBadge(finalV, finalCls)}</td></tr>`;
+	});
+	const roundHeaders = Array.from({ length: maxRound }, (_, i) => `<th>R${i + 1}</th>`).join("");
+
+	// Expert verdict strip chips (link to expert cards in panel section)
+	const verdictChips = expertNames.map((name) => {
+		const rmap = verdictMap.get(name) ?? new Map<number, string>();
+		const finalV = rmap.get(maxRound) ?? (rmap.size ? [...rmap.values()].at(-1)! : status);
+		const cls = finalV === "ACCEPT" ? "badge-accept" : finalV === "ITERATE" ? "badge-iterate" : finalV === "REJECT" ? "badge-reject" : "badge-neutral";
+		const anchor = `expert-${name.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "")}`;
+		// Pull key concern from last expert child run
+		const lastRun = childRuns.filter((r) => r.name === name && r.phase === "expert").at(-1);
+		const blockers = lastRun ? extractListItems(extractMarkdownSection(lastRun.text, "Blocking objections"), 1) : [];
+		const concern = blockers[0] ? stripMarkdownForSnippet(blockers[0], 60) : "";
+		return `<a href="#${anchor}" class="verdict-chip"><span class="badge ${cls}" style="font-size:10px">${escapeHtml(finalV)}</span><span class="vc-name">${escapeHtml(reportDisplayName(name))}</span>${concern ? `<span class="vc-concern">${escapeHtml(concern)}</span>` : ""}</a>`;
+	}).join("\n");
+
+	// Expert detail cards from final-round runs
+	const expertCards = expertNames.map((name) => {
+		const allRuns = childRuns.filter((r) => r.name === name && r.phase === "expert");
+		const lastRun = allRuns.at(-1);
+		if (!lastRun) return "";
+		const v = extractVerdict(lastRun.text) ?? status;
+		const vCls = v === "ACCEPT" ? "badge-accept" : v === "ITERATE" ? "badge-iterate" : v === "REJECT" ? "badge-reject" : "badge-neutral";
+		const blockers = extractListItems(extractMarkdownSection(lastRun.text, "Blocking objections"), 3);
+		const strongestV = extractMarkdownSection(lastRun.text, "Strongest viable version");
+		const anchor = `expert-${name.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "")}`;
+		return `
+<article class="expert-card" id="${anchor}">
+  <div class="ec-header"><span class="ec-name">${escapeHtml(reportDisplayName(name))}</span>${renderHtmlBadge(v, vCls)}</div>
+  ${blockers.length ? `<div class="ec-label">Key concern${blockers.length > 1 ? "s" : ""}</div><ul style="margin-top:4px;font-size:14px">${blockers.map((b) => `<li>${escapeHtml(b)}</li>`).join("")}</ul>` : ""}
+  ${strongestV ? `<div class="ec-label" style="margin-top:12px">Strongest viable version</div><p class="ec-concern" style="font-size:14px">${escapeHtml(stripMarkdownForSnippet(strongestV, 300))}</p>` : ""}
+  <details class="artifact-item" style="margin-top:14px"><summary><span>Full critique (round ${lastRun.round ?? "—"})</span></summary><div class="artifact-content">${renderMarkdownLite(lastRun.text)}</div></details>
+</article>`;
+	}).join("\n");
+
+	// Scratch evidence
+	const scratchHtml = scratchFiles.length
+		? (await Promise.all(scratchFiles.map(async (file) => {
+			const content = await read(file);
+			return `<details class="artifact-item"><summary><span>${escapeHtml(path.relative(scratchRoot, file))}</span></summary><div class="artifact-content">${renderMarkdownLite(content)}</div></details>`;
+		}))).join("\n")
+		: "";
+
+	// Raw artifact details (collapsed)
+	const rawArtifactHtml = artifacts.map((artifact) => {
+		const label = `${artifact.round ? `Round ${artifact.round} · ` : ""}${artifact.expert ? `${reportDisplayName(artifact.expert)} · ` : ""}${artifact.name}`;
+		return `<details class="artifact-item"><summary><span>${escapeHtml(label)}</span><span class="artifact-filename">${escapeHtml(artifact.rel)}</span></summary><div class="artifact-content">${renderMarkdownLite(artifact.content)}</div></details>`;
+	}).join("\n");
+
+	const showIntervention = status === "ITERATE" || status === "REJECT" || status === "DEGRADED";
+	const degradedBanner = status === "DEGRADED" ? `
+<div class="callout degraded" style="margin-bottom:20px">
+  <strong>Run health warning</strong> — One or more child runs failed, timed out, or produced empty output. This report is based on partial data. Use <code>/workshop-pickup</code> to continue from the last reliable synthesis.
+</div>` : "";
+
 	const html = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Pi workshop report — ${escapeHtml(status)}</title>
+<title>Pi Workshop — ${escapeHtml(title)}</title>
 <style>
-:root { color-scheme: light dark; --fg:#152033; --muted:#667085; --subtle:#8492a6; --bg:#f4f7fb; --card:#ffffff; --card2:#f8fafc; --border:#d9e2ec; --accent:#4f46e5; --accent2:#06b6d4; --ok:#15803d; --warn:#b45309; --bad:#b91c1c; --shadow:0 18px 50px rgba(15,23,42,.09); }
-@media (prefers-color-scheme: dark) { :root { --fg:#e5edf7; --muted:#a8b3c4; --subtle:#7c8797; --bg:#0b1020; --card:#111827; --card2:#172033; --border:#293449; --accent:#8b5cf6; --accent2:#22d3ee; --ok:#4ade80; --warn:#fbbf24; --bad:#fb7185; --shadow:0 18px 50px rgba(0,0,0,.38); } }
-* { box-sizing:border-box; } body { margin:0; font:15px/1.55 Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color:var(--fg); background:radial-gradient(circle at top left, rgba(79,70,229,.16), transparent 34rem), var(--bg); }
-a { color:var(--accent); } main { max-width:1240px; margin:0 auto; padding:30px 22px 70px; }
-.hero { border:1px solid var(--border); border-radius:28px; background:linear-gradient(135deg, rgba(79,70,229,.18), rgba(6,182,212,.10)), var(--card); padding:28px; box-shadow:var(--shadow); }
-.hero-top { display:flex; justify-content:space-between; gap:20px; align-items:flex-start; flex-wrap:wrap; } .eyebrow { margin:0 0 6px; color:var(--accent); text-transform:uppercase; letter-spacing:.12em; font-weight:800; font-size:12px; }
-h1 { margin:0; font-size:clamp(30px, 4vw, 52px); line-height:1.02; letter-spacing:-.04em; } h2 { font-size:25px; margin:34px 0 12px; letter-spacing:-.02em; } h3 { margin:0; font-size:20px; } h4 { margin:0 0 8px; } h5 { margin:0 0 6px; color:var(--muted); text-transform:uppercase; letter-spacing:.08em; font-size:11px; }
-.path { color:var(--muted); font-family:ui-monospace,SFMono-Regular,Menlo,monospace; overflow-wrap:anywhere; } .summary { font-size:18px; max-width:850px; color:var(--fg); }
-.grid, .metric-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:14px; } .metric { background:var(--card); border:1px solid var(--border); border-radius:18px; padding:15px; } .metric span { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.08em; font-weight:750; } .metric b { display:block; margin-top:5px; font-size:25px; letter-spacing:-.03em; } .metric small { color:var(--muted); display:block; margin-top:5px; }
-.metric-ok b, .ok { color:var(--ok); } .metric-warn b, .warn { color:var(--warn); } .metric-bad b, .bad { color:var(--bad); }
-.card, .round-card, details.artifact, .expert-card { background:var(--card); border:1px solid var(--border); border-radius:20px; padding:18px; margin:14px 0; box-shadow:0 1px 2px rgba(15,23,42,.035); } .card.emphasis { border-color:color-mix(in srgb, var(--accent) 45%, var(--border)); }
-.badge { display:inline-flex; align-items:center; gap:6px; border:1px solid var(--border); border-radius:999px; padding:5px 10px; font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:.06em; } .badge-ok { color:var(--ok); background:color-mix(in srgb, var(--ok) 12%, transparent); } .badge-warn { color:var(--warn); background:color-mix(in srgb, var(--warn) 12%, transparent); } .badge-bad { color:var(--bad); background:color-mix(in srgb, var(--bad) 12%, transparent); } .badge-neutral { color:var(--muted); background:var(--card2); }
-.report-nav { display:flex; flex-wrap:wrap; gap:8px; margin:18px 0 0; } .report-nav a { text-decoration:none; border:1px solid var(--border); background:var(--card); color:var(--fg); padding:8px 11px; border-radius:999px; font-weight:650; }
-.two-col { display:grid; grid-template-columns:minmax(0,1.05fr) minmax(280px,.95fr); gap:16px; } .arc-grid, .mini-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:14px; }
-.callout { border-left:4px solid var(--accent); background:var(--card2); padding:14px 16px; border-radius:14px; } .callout.warn { border-left-color:var(--warn); } .callout.bad { border-left-color:var(--bad); }
-.round-card > header, .expert-card > header { display:flex; justify-content:space-between; gap:14px; align-items:flex-start; flex-wrap:wrap; margin-bottom:14px; } .round-badges { display:flex; gap:8px; flex-wrap:wrap; }
-details summary { cursor:pointer; font-weight:760; display:flex; justify-content:space-between; gap:12px; align-items:center; } details summary code { color:var(--muted); font-size:12px; font-weight:500; overflow-wrap:anywhere; }
-pre { white-space:pre-wrap; overflow:auto; background:color-mix(in srgb, var(--fg) 6%, transparent); padding:13px; border-radius:12px; border:1px solid var(--border); max-height:520px; } code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.93em; }
-ul, ol { padding-left:1.35rem; } li { margin:.3rem 0; } .muted { color:var(--muted); } .small { font-size:13px; color:var(--muted); }
-.table-wrap { overflow:auto; border:1px solid var(--border); border-radius:16px; } table { width:100%; border-collapse:collapse; min-width:820px; background:var(--card); } th, td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--border); vertical-align:top; } th { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.08em; background:var(--card2); }
-footer { margin-top:40px; color:var(--muted); border-top:1px solid var(--border); padding-top:18px; }
-@media (max-width: 860px) { .two-col { grid-template-columns:1fr; } .hero { padding:21px; border-radius:22px; } main { padding:18px 13px 50px; } }
-@media print { body { background:#fff; } .hero, .card, .round-card, details.artifact, .expert-card { box-shadow:none; } .report-nav, details.artifact pre { max-height:none; } }
+:root {
+  color-scheme: light dark;
+  --bg:#f6f8fb; --card:#ffffff; --card2:#f1f5f9; --border:#dde3ed;
+  --shadow:0 1px 3px rgba(15,23,42,.07),0 4px 16px rgba(15,23,42,.05);
+  --fg:#0f172a; --muted:#5c6a82; --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  --accept-bg:#d1fae5; --accept-fg:#065f46;
+  --iterate-bg:#fef3c7; --iterate-fg:#78350f;
+  --reject-bg:#fee2e2; --reject-fg:#7f1d1d;
+  --degraded-bg:#ffedd5; --degraded-fg:#7c2d12;
+  --accent:#2563eb; --link:#1d4ed8;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:#0a1120; --card:#111827; --card2:#1a2436; --border:#263147;
+    --shadow:0 1px 3px rgba(0,0,0,.3),0 4px 16px rgba(0,0,0,.25);
+    --fg:#e2e8f0; --muted:#8899b0;
+    --accept-bg:#064e3b; --accept-fg:#6ee7b7;
+    --iterate-bg:#451a03; --iterate-fg:#fcd34d;
+    --reject-bg:#450a0a; --reject-fg:#fca5a5;
+    --degraded-bg:#431407; --degraded-fg:#fdba74;
+    --accent:#60a5fa; --link:#93c5fd;
+  }
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+body{font:15px/1.6 Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--fg);background:var(--bg);}
+a{color:var(--link);}a:hover{text-decoration:underline;}
+h2{font-size:20px;font-weight:700;letter-spacing:-.02em;margin-bottom:14px;}
+h3{font-size:16px;font-weight:700;margin-bottom:8px;}
+p{margin-bottom:.5em;}p:last-child{margin-bottom:0;}
+ul,ol{padding-left:1.3em;}li{margin:.25em 0;}
+code{font-family:var(--mono);font-size:.88em;}
+main{max-width:1120px;margin:0 auto;padding:28px 20px 72px;}
+section{margin-top:36px;}
+.card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px 20px;box-shadow:var(--shadow);}
+.badge{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:999px;font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;border:1px solid transparent;}
+.badge-sm{padding:3px 7px;font-size:10px;}
+.badge-accept{background:var(--accept-bg);color:var(--accept-fg);}
+.badge-iterate{background:var(--iterate-bg);color:var(--iterate-fg);}
+.badge-reject{background:var(--reject-bg);color:var(--reject-fg);}
+.badge-degraded{background:var(--degraded-bg);color:var(--degraded-fg);}
+.badge-neutral{background:var(--card2);color:var(--muted);border-color:var(--border);}
+.hero{background:var(--card);border:1px solid var(--border);border-radius:18px;padding:28px 28px 22px;box-shadow:var(--shadow);}
+.hero h1{font-size:clamp(22px,3.5vw,34px);font-weight:800;letter-spacing:-.035em;line-height:1.1;margin-bottom:8px;}
+.hero-meta{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:22px;}
+.hero-meta .path{font-family:var(--mono);font-size:12px;color:var(--muted);}
+.abstract-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-bottom:20px;}
+.abstract-card{background:var(--card2);border:1px solid var(--border);border-radius:12px;padding:14px 16px;}
+.abstract-label{font-size:11px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:6px;}
+.abstract-card p{font-size:14px;line-height:1.55;}
+.convergence-strip{display:flex;gap:18px;flex-wrap:wrap;align-items:center;padding:12px 14px;background:var(--card2);border:1px solid var(--border);border-radius:10px;margin-bottom:16px;}
+.conv-item{display:flex;flex-direction:column;}
+.conv-label{font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;}
+.conv-value{font-size:18px;font-weight:800;letter-spacing:-.02em;margin-top:1px;}
+.verdict-strip{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:18px;}
+.verdict-chip{display:inline-flex;align-items:center;gap:8px;background:var(--card2);border:1px solid var(--border);border-radius:999px;padding:6px 12px 6px 8px;font-size:13px;font-weight:600;text-decoration:none;color:var(--fg);transition:border-color .15s;cursor:pointer;}
+.verdict-chip:hover{border-color:var(--accent);text-decoration:none;}
+.vc-name{font-weight:700;}.vc-concern{color:var(--muted);font-size:12px;font-weight:400;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.pickup-block{background:var(--card2);border:1px solid var(--border);border-left:3px solid var(--iterate-fg);border-radius:10px;padding:12px 14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
+.pickup-block code{flex:1;font-size:13px;color:var(--fg);word-break:break-all;}
+.btn-copy{flex-shrink:0;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:6px 12px;font-size:12px;font-weight:700;cursor:pointer;color:var(--fg);transition:background .15s;}
+.btn-copy:hover{background:var(--card2);}.btn-copy.copied{color:var(--accept-fg);border-color:var(--accept-fg);}
+.callout{padding:14px 16px;border-radius:12px;border-left:4px solid transparent;background:var(--card2);}
+.callout.iterate{border-left-color:var(--iterate-fg);background:var(--iterate-bg);}
+.callout.reject{border-left-color:var(--reject-fg);background:var(--reject-bg);}
+.callout.degraded{border-left-color:var(--degraded-fg);background:var(--degraded-bg);}
+.intervention-grid{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(260px,1fr);gap:14px;}
+.convergence-table-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:12px;}
+table{width:100%;border-collapse:collapse;}
+th,td{padding:10px 14px;text-align:left;border-bottom:1px solid var(--border);font-size:14px;vertical-align:middle;}
+th{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);background:var(--card2);}
+tr:last-child td{border-bottom:none;}
+.expert-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin-top:20px;}
+.expert-card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px 20px;box-shadow:var(--shadow);scroll-margin-top:80px;}
+.ec-header{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:12px;}
+.ec-name{font-size:15px;font-weight:800;}.ec-concern{font-size:14px;}
+.ec-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-bottom:4px;margin-top:12px;}
+.round-arc{display:grid;gap:14px;}
+.round-card{background:var(--card);border:1px solid var(--border);border-radius:14px;overflow:hidden;box-shadow:var(--shadow);}
+.round-header{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:14px 18px;background:var(--card2);border-bottom:1px solid var(--border);cursor:pointer;user-select:none;}
+.round-header:hover{background:var(--border);}
+.rh-left{display:flex;align-items:center;gap:12px;}
+.round-num{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);}
+.round-title{font-size:15px;font-weight:700;}
+.round-chevron{color:var(--muted);font-size:14px;transition:transform .2s;}
+.round-header.open .round-chevron{transform:rotate(180deg);}
+.round-body{padding:16px 18px;display:none;}
+.round-body.open{display:block;}
+.round-cols{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;}
+.round-col{background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:12px 14px;}
+.round-col-label{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:6px;}
+.prior-art-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;}
+.prior-art-card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px 18px;box-shadow:var(--shadow);}
+.prior-art-card h3{font-size:14px;margin-bottom:6px;}
+.prior-art-card p{font-size:13px;color:var(--muted);}
+.prior-art-card a{display:inline-flex;align-items:center;gap:4px;font-size:13px;font-weight:600;margin-top:8px;}
+.ledger-tabs{display:flex;gap:6px;margin-bottom:14px;}
+.ledger-tab{padding:6px 14px;border-radius:999px;font-size:13px;font-weight:700;border:1px solid var(--border);background:var(--card2);cursor:pointer;color:var(--fg);}
+.ledger-tab.active{background:var(--accent);color:#fff;border-color:var(--accent);}
+.ledger-view{display:none;}.ledger-view.active{display:block;}
+.ledger-summary-list{display:grid;gap:10px;}
+.ledger-summary-item{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px 16px;display:grid;grid-template-columns:140px 1fr auto;gap:12px;align-items:start;}
+.lsi-expert{font-weight:700;font-size:14px;}.lsi-round{font-size:12px;color:var(--muted);margin-top:2px;}.lsi-opinion{font-size:14px;}
+.ledger-details-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:12px;}
+.raw-details>summary{display:flex;align-items:center;gap:10px;padding:12px 16px;background:var(--card);border:1px solid var(--border);border-radius:12px;cursor:pointer;font-weight:700;font-size:14px;color:var(--muted);list-style:none;}
+.raw-details>summary::-webkit-details-marker{display:none;}
+.raw-details>summary::before{content:"\25B6";font-size:10px;transition:transform .2s;}
+.raw-details[open]>summary::before{transform:rotate(90deg);}
+.raw-details>summary:hover{color:var(--fg);}
+.raw-artifact-list{display:grid;gap:12px;margin-top:14px;}
+details.artifact-item{background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden;}
+details.artifact-item>summary{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 16px;cursor:pointer;font-size:14px;font-weight:600;list-style:none;color:var(--fg);}
+details.artifact-item>summary::-webkit-details-marker{display:none;}
+details.artifact-item>summary:hover{background:var(--card2);}
+.artifact-filename{font-family:var(--mono);font-size:13px;color:var(--muted);}
+.artifact-content{padding:0 16px 16px;border-top:1px solid var(--border);}
+.section-label{font-size:11px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:10px;}
+footer{margin-top:48px;padding-top:18px;border-top:1px solid var(--border);color:var(--muted);font-size:13px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;}
+@media(max-width:720px){.intervention-grid,.round-cols{grid-template-columns:1fr;}.ledger-summary-item{grid-template-columns:1fr;}}
 </style>
 </head>
-<body><main>
-<section class="hero" id="top">
-  <div class="hero-top"><div><p class="eyebrow">Pi workshop report</p><h1>${escapeHtml(status)} ${args.result.converged ? "resolution" : "workshop trace"}</h1><p class="summary">${escapeHtml(statusMeaning(status, args.result.converged))}</p></div><div>${renderBadge(status, tone)} ${renderBadge(args.result.converged ? "converged" : "not converged", args.result.converged ? "ok" : "warn")}</div></div>
-  <p class="path">${escapeHtml(args.workshopDir)}</p>
-  <div class="metric-grid">
-    ${renderMetric("Status", status, tone)}
-    ${renderMetric("Rounds", String(args.result.roundsRun), "neutral")}
-    ${renderMetric("Experts", String(args.result.experts.length), "neutral", args.result.experts.join(", "))}
-    ${renderMetric("Child-run issues", String(failingRuns.length), failingRuns.length ? "bad" : "ok")}
+<body>
+<main>
+
+<!-- HERO -->
+<header class="hero" id="top">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:20px">
+    <div>
+      <h1>${escapeHtml(title)}</h1>
+      <div class="hero-meta">
+        <span class="badge ${statusCls}">${escapeHtml(status)}</span>
+        <span class="badge badge-neutral">${args.result.converged ? "converged" : "not converged"}</span>
+        <span class="path">${escapeHtml(args.workshopDir)}</span>
+      </div>
+    </div>
   </div>
-  <nav class="report-nav"><a href="#executive-summary">Executive summary</a><a href="#intervention">Intervention</a><a href="#discussion-arc">Discussion arc</a><a href="#conclusions">Conclusions</a><a href="#evidence">Evidence ledger</a><a href="#artifacts">Artifacts</a></nav>
+  ${degradedBanner}
+  ${(why || how || what) ? `<div class="abstract-grid">
+    ${why ? `<div class="abstract-card"><div class="abstract-label">Why</div><p>${escapeHtml(why)}</p></div>` : ""}
+    ${how ? `<div class="abstract-card"><div class="abstract-label">How</div><p>${escapeHtml(how)}</p></div>` : ""}
+    ${what ? `<div class="abstract-card"><div class="abstract-label">What</div><p>${escapeHtml(what)}</p></div>` : `<div class="abstract-card"><div class="abstract-label">What</div><p>${escapeHtml(conclusion || statusMeaning(status, args.result.converged))}</p></div>`}
+  </div>` : `<div class="abstract-grid">
+    <div class="abstract-card"><div class="abstract-label">Direction</div><p>${escapeHtml(direction)}</p></div>
+    <div class="abstract-card"><div class="abstract-label">Conclusion</div><p>${escapeHtml(conclusion || statusMeaning(status, args.result.converged))}</p></div>
+    <div class="abstract-card"><div class="abstract-label">What changed</div><p>${escapeHtml(changed)}</p></div>
+  </div>`}
+  <div class="convergence-strip">
+    <div class="conv-item"><span class="conv-label">Verdict</span><span class="conv-value" style="color:var(--${status.toLowerCase()}-fg, var(--muted))">${escapeHtml(status)}</span></div>
+    <div class="conv-item"><span class="conv-label">Rounds</span><span class="conv-value">${args.result.roundsRun}</span></div>
+    <div class="conv-item"><span class="conv-label">Experts</span><span class="conv-value">${args.result.experts.length}</span></div>
+    <div class="conv-item"><span class="conv-label">Converged</span><span class="conv-value" style="color:var(--${args.result.converged ? "accept" : "iterate"}-fg)">${args.result.converged ? "Yes" : "No"}</span></div>
+    ${failingRuns.length ? `<div class="conv-item"><span class="conv-label">Run issues</span><span class="conv-value" style="color:var(--reject-fg)">${failingRuns.length}</span></div>` : ""}
+  </div>
+  ${expertNames.length ? `<div class="section-label">Panel at a glance</div><div class="verdict-strip">${verdictChips}</div>` : ""}
+  ${showIntervention ? `<div class="section-label" style="margin-top:16px">Continue this workshop</div><div class="pickup-block"><code id="pickup-cmd">${escapeHtml(pickupCmd)}</code><button class="btn-copy" onclick="copyPickup(this)">Copy</button></div>` : ""}
+</header>
+
+${showIntervention ? `
+<!-- INTERVENTION -->
+<section id="intervention" aria-labelledby="intervention-heading">
+  <h2 id="intervention-heading">🚧 Before you proceed</h2>
+  <div class="intervention-grid">
+    <div>
+      <div class="callout ${status.toLowerCase()}" style="margin-bottom:12px">
+        <h3 style="margin-bottom:8px">The blocking concern</h3>
+        <p>${escapeHtml(reportBrief.intervention || (interventions.length ? interventions[0] : "Review the conclusions below before acting."))}</p>
+      </div>
+      <div class="card">
+        <h3>Decisions and repairs needed</h3>
+        ${interventions.length > 1 ? `<ul style="margin-top:8px">${interventions.slice(1).map((i) => `<li>${escapeHtml(i)}</li>`).join("")}</ul>` : `<p style="color:var(--muted);font-size:14px">No additional intervention items were extracted.</p>`}
+      </div>
+    </div>
+    <div class="card" style="display:flex;flex-direction:column;gap:12px">
+      <h3>Pick up where this left off</h3>
+      <p style="font-size:14px;color:var(--muted)">Run this from your project directory after making the changes above.</p>
+      <div class="pickup-block"><code>${escapeHtml(pickupCmd)}</code><button class="btn-copy" onclick="copyPickup(this)">Copy</button></div>
+      <p style="font-size:12px;color:var(--muted)">Or restart: <code>/workshop --rounds ${args.result.roundsRun} &lt;idea&gt;</code></p>
+    </div>
+  </div>
+</section>` : ""}
+
+<!-- PANEL -->
+<section id="panel" aria-labelledby="panel-heading">
+  <h2 id="panel-heading">The panel</h2>
+  ${expertNames.length && maxRound > 0 ? `
+  <div class="convergence-table-wrap">
+    <table>
+      <thead><tr><th>Expert</th>${roundHeaders}<th>Final</th></tr></thead>
+      <tbody>${convergenceTableRows.join("")}</tbody>
+    </table>
+  </div>
+  <div class="expert-cards">${expertCards}</div>` : `<p style="color:var(--muted);font-size:14px">No expert child runs were recorded.</p>`}
 </section>
 
-<section id="executive-summary">
-  <h2>Executive summary</h2>
-  <div class="two-col">
-    <article class="card emphasis"><h3>Direction of discussion</h3><p>${escapeHtml(direction)}</p><h3>Final conclusion</h3><p>${escapeHtml(conclusion || statusMeaning(status, args.result.converged))}</p></article>
-    <aside class="card"><h3>Human readability brief</h3><div class="callout ${interventions.length ? "warn" : ""}"><strong>Human intervention required:</strong> ${escapeHtml(interventionLabel)}</div><p><strong>What changed from the original idea:</strong> ${escapeHtml(changed)}</p><p><strong>Confidence / evidence quality:</strong> ${escapeHtml(confidence)}</p><p><strong>Next recommended action:</strong> ${escapeHtml(reportBrief.nextAction || defaultNextAction(status))}</p></aside>
+<!-- ROUND ARC -->
+<section id="arc" aria-labelledby="arc-heading">
+  <h2 id="arc-heading">Round-by-round discussion arc</h2>
+  ${rounds.length ? `<div class="round-arc">${rounds.map(renderRoundArcCard).join("\n")}</div>` : `<p style="color:var(--muted)">No round artifacts were recorded.</p>`}
+</section>
+
+${renderPriorArtSection(reportBrief.priorArt)}
+
+<!-- EVIDENCE LEDGER -->
+<section id="evidence" aria-labelledby="evidence-heading">
+  <h2 id="evidence-heading">Evidence ledger</h2>
+  <div class="ledger-tabs">
+    <button class="ledger-tab active" onclick="switchLedger('summary',this)">Summary view</button>
+    <button class="ledger-tab" onclick="switchLedger('details',this)">Details &amp; metrics</button>
+  </div>
+  <div class="ledger-view active" id="ledger-summary">
+    <div class="ledger-summary-list">
+      ${childRuns.filter((r) => r.phase !== "planner" && r.phase !== "assistant_brief").map(renderLedgerSummaryRow).join("\n")}
+      ${answers.trim() && answers.trim() !== "[could not read" ? `<div class="ledger-summary-item" style="grid-template-columns:140px 1fr"><div><div class="lsi-expert">User rulings</div><div class="lsi-round">Q&amp;A answers</div></div><div class="lsi-opinion">${renderMarkdownLite(answers)}</div></div>` : ""}
+    </div>
+  </div>
+  <div class="ledger-view" id="ledger-details">
+    <div class="ledger-details-wrap">
+      <table>
+        <thead><tr><th>Expert / Role</th><th>Phase</th><th>Round</th><th>Status</th><th>Duration</th><th>Tool calls</th><th>Model</th><th>Input tokens</th><th>Output tokens</th><th>Cost</th></tr></thead>
+        <tbody>
+          ${childRuns.map(renderLedgerDetailsRow).join("\n")}
+          <tr style="font-weight:700;background:var(--card2)"><td colspan="7">Total</td><td>${childRuns.reduce((s, r) => s + (r.usage?.input ?? 0), 0).toLocaleString()}</td><td>${childRuns.reduce((s, r) => s + (r.usage?.output ?? 0), 0).toLocaleString()}</td><td>$${childRuns.reduce((s, r) => s + (r.usage?.cost ?? 0), 0).toFixed(3)}</td></tr>
+        </tbody>
+      </table>
+    </div>
   </div>
 </section>
 
-<section id="intervention">
-  <h2>Intervention required</h2>
-  <div class="card ${interventions.length || status === "DEGRADED" ? "emphasis" : ""}">
-    <p class="muted">Items below are the places where a human decision, rerun, or repair is most likely to change the outcome.</p>
-    ${renderList(interventions, args.result.converged && status === "ACCEPT" ? "No blocking intervention was detected." : "No specific intervention items were extracted; review the conclusion before acting.")}
+<!-- RAW ARTIFACTS -->
+<details class="raw-details" id="raw" style="margin-top:36px">
+  <summary>Raw artifacts — click to expand</summary>
+  <div style="margin-top:16px">
+    <div class="raw-artifact-list">
+      ${scratchHtml ? `<details class="artifact-item"><summary><span>Scratch / prototype evidence</span></summary><div class="artifact-content">${scratchHtml}</div></details>` : ""}
+      ${rawArtifactHtml}
+      <details class="artifact-item"><summary><span>Workflow &amp; config</span><span class="artifact-filename">workflow.md</span></summary><div class="artifact-content">${renderMarkdownLite(workflow)}</div></details>
+      <details class="artifact-item"><summary><span>Original idea prompt</span><span class="artifact-filename">idea.md</span></summary><div class="artifact-content">${renderMarkdownLite(idea)}</div></details>
+    </div>
   </div>
-</section>
-
-<section id="discussion-arc">
-  <h2>Discussion arc</h2>
-  <p class="muted">Round-by-round synthesis of where the panel agreed, what changed, and what remained unresolved.</p>
-  ${rounds.length ? rounds.map(renderRoundCard).join("\n") : `<section class="card"><p class="muted">No round artifacts were recorded.</p></section>`}
-</section>
-
-<section id="conclusions">
-  <h2>Conclusions and action plan</h2>
-  <div class="grid">
-    <article class="card"><h3>Strongest viable version</h3>${renderMarkdownLite(strongest)}</article>
-    <article class="card"><h3>Required idea revision</h3>${renderMarkdownLite(requiredRevision, "No required revision recorded.")}</article>
-    <article class="card"><h3>Action checklist</h3>${renderList(actionItems.length ? actionItems : [defaultNextAction(status)])}</article>
-  </div>
-  <article class="card"><h3>Final resolution artifact</h3>${renderMarkdownLite(final)}</article>
-</section>
-
-<section id="evidence">
-  <h2>Evidence ledger</h2>
-  <div class="grid">
-    <article class="card"><h3>User answers / rulings</h3>${renderMarkdownLite(answers, "No user answers were recorded.")}</article>
-    <article class="card"><h3>Workflow and delegation policy</h3>${renderMarkdownLite(workflow)}</article>
-    <article class="card"><h3>Original goal / prompt</h3>${renderMarkdownLite(idea)}</article>
-  </div>
-  <article class="card"><h3>Child-run trust ledger</h3>${renderChildRunLedger(childRuns)}</article>
-  <article class="card"><h3>Scratch / prototype evidence</h3>${scratchFiles.length ? (await Promise.all(scratchFiles.map(async (file) => renderArtifactDetails({ file, rel: path.relative(args.workshopDir, file), name: path.basename(file), kind: "other", content: await read(file) }, path.relative(scratchRoot, file))))).join("\n") : `<p class="muted">No scratch/prototype artifacts were recorded.</p>`}</article>
-</section>
-
-<section id="artifacts">
-  <h2>Raw artifact archive</h2>
-  <p class="muted">All report claims above are backed by these local workshop artifacts. Paths are relative to the workshop directory.</p>
-  ${artifacts.map((artifact) => renderArtifactDetails(artifact, `${artifact.kind}: ${artifact.round ? `round ${artifact.round} · ` : ""}${artifact.expert ? `${reportDisplayName(artifact.expert)} · ` : ""}${artifact.name}`)).join("\n")}
-</section>
+</details>
 
 <footer>
-  <p>Resolution: <a href="${artifactHref(path.relative(args.workshopDir, args.finalPath))}">${escapeHtml(path.relative(args.workshopDir, args.finalPath))}</a> · Transcript: <a href="${artifactHref(path.relative(args.workshopDir, args.transcriptPath))}">${escapeHtml(path.relative(args.workshopDir, args.transcriptPath))}</a> · Manifest: <a href="${artifactHref(path.relative(args.workshopDir, args.result.manifestPath))}">${escapeHtml(path.relative(args.workshopDir, args.result.manifestPath))}</a></p>
+  <span>pi-workshop · <a href="${artifactHref(path.relative(args.workshopDir, args.finalPath))}">${escapeHtml(path.relative(args.workshopDir, args.finalPath))}</a> · <a href="${artifactHref(path.relative(args.workshopDir, args.transcriptPath))}">${escapeHtml(path.relative(args.workshopDir, args.transcriptPath))}</a> · <a href="${artifactHref(path.relative(args.workshopDir, args.result.manifestPath))}">${escapeHtml(path.relative(args.workshopDir, args.result.manifestPath))}</a></span>
+  <span>${escapeHtml(args.workshopDir)}</span>
 </footer>
-</main></body></html>`;
+
+</main>
+<script>
+function copyPickup(btn) {
+  const cmd = document.getElementById('pickup-cmd')?.textContent || btn.closest('.pickup-block')?.querySelector('code')?.textContent || '';
+  navigator.clipboard.writeText(cmd.trim()).then(() => { btn.textContent='Copied!'; btn.classList.add('copied'); setTimeout(()=>{btn.textContent='Copy';btn.classList.remove('copied');},2000); }).catch(()=>{btn.textContent='Copy';});
+}
+function toggleRound(header) {
+  const body=header.nextElementSibling; const isOpen=header.classList.contains('open');
+  header.classList.toggle('open',!isOpen); body.classList.toggle('open',!isOpen);
+}
+function switchLedger(view,btn) {
+  document.querySelectorAll('.ledger-view').forEach(v=>v.classList.remove('active'));
+  document.querySelectorAll('.ledger-tab').forEach(b=>b.classList.remove('active'));
+  document.getElementById('ledger-'+view)?.classList.add('active'); btn.classList.add('active');
+}
+document.querySelectorAll('.verdict-chip[href^="#"]').forEach(chip=>{
+  chip.addEventListener('click',e=>{e.preventDefault();const t=document.querySelector(chip.getAttribute('href'));if(t)t.scrollIntoView({behavior:'smooth',block:'start'});});
+});
+document.addEventListener('DOMContentLoaded',()=>{
+  const h=document.querySelector('.round-header'); const b=document.querySelector('.round-body');
+  if(h&&b){h.classList.add('open');b.classList.add('open');}
+});
+<\/script>
+</body>
+</html>`;
 	await writeFileQueued(reportPath, html);
 	return reportPath;
 }

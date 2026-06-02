@@ -3,191 +3,1072 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Prototype — Pi Workshop Resolution Report</title>
+<title>Pi Workshop Report — Recursive Expert Workshop Security &amp; Release Review</title>
 <style>
+/* ── Tokens ──────────────────────────────────────────────────────────── */
 :root {
   color-scheme: light dark;
-  --fg:#111827; --muted:#64748b; --bg:#f5f7fb; --card:#ffffff; --card2:#f8fafc;
-  --border:#dbe4ef; --accent:#4f46e5; --accent2:#0891b2; --ok:#15803d; --warn:#b45309; --bad:#b91c1c;
-  --shadow:0 18px 55px rgba(15,23,42,.10);
+
+  /* Surface */
+  --bg:       #f6f8fb;
+  --card:     #ffffff;
+  --card2:    #f1f5f9;
+  --border:   #dde3ed;
+  --shadow:   0 1px 3px rgba(15,23,42,.07), 0 4px 16px rgba(15,23,42,.05);
+
+  /* Text */
+  --fg:       #0f172a;
+  --muted:    #5c6a82;
+  --mono:     ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* Colorblind-safe status palette (deuteranopia/protanopia safe) */
+  --accept-bg:    #d1fae5; --accept-fg:    #065f46;
+  --iterate-bg:   #fef3c7; --iterate-fg:   #78350f;
+  --reject-bg:    #fee2e2; --reject-fg:    #7f1d1d;
+  --degraded-bg:  #ffedd5; --degraded-fg:  #7c2d12;
+
+  /* Accent & semantic */
+  --accent:   #2563eb;
+  --link:     #1d4ed8;
 }
+
 @media (prefers-color-scheme: dark) {
-  :root { --fg:#e5edf7; --muted:#9aa8ba; --bg:#09111f; --card:#111827; --card2:#172033; --border:#2b3649; --accent:#8b5cf6; --accent2:#22d3ee; --ok:#4ade80; --warn:#fbbf24; --bad:#fb7185; --shadow:0 18px 55px rgba(0,0,0,.42); }
+  :root {
+    --bg:       #0a1120;
+    --card:     #111827;
+    --card2:    #1a2436;
+    --border:   #263147;
+    --shadow:   0 1px 3px rgba(0,0,0,.3), 0 4px 16px rgba(0,0,0,.25);
+    --fg:       #e2e8f0;
+    --muted:    #8899b0;
+    --accept-bg:   #064e3b; --accept-fg:   #6ee7b7;
+    --iterate-bg:  #451a03; --iterate-fg:  #fcd34d;
+    --reject-bg:   #450a0a; --reject-fg:   #fca5a5;
+    --degraded-bg: #431407; --degraded-fg: #fdba74;
+    --accent:   #60a5fa;
+    --link:     #93c5fd;
+  }
 }
-* { box-sizing:border-box; }
-body { margin:0; font:15px/1.55 Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color:var(--fg); background:radial-gradient(circle at top left, rgba(79,70,229,.16), transparent 34rem), var(--bg); }
-main { max-width:1220px; margin:0 auto; padding:30px 22px 70px; }
-h1 { margin:0; font-size:clamp(34px,4vw,56px); line-height:1.02; letter-spacing:-.045em; }
-h2 { margin:34px 0 12px; font-size:26px; letter-spacing:-.025em; }
-h3 { margin:0 0 10px; font-size:20px; }
-h4 { margin:0 0 8px; font-size:16px; }
-p { margin:.45rem 0; }
-ul { padding-left:1.25rem; margin:.45rem 0; }
-li { margin:.28rem 0; }
-code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
-.hero { border:1px solid var(--border); border-radius:30px; background:linear-gradient(135deg, rgba(79,70,229,.18), rgba(8,145,178,.10)), var(--card); padding:28px; box-shadow:var(--shadow); }
-.hero-top { display:flex; justify-content:space-between; gap:22px; align-items:flex-start; flex-wrap:wrap; }
-.eyebrow { margin:0 0 7px; color:var(--accent); text-transform:uppercase; letter-spacing:.13em; font-size:12px; font-weight:850; }
-.summary { max-width:850px; font-size:18px; color:var(--fg); }
-.path { color:var(--muted); font-family:ui-monospace,SFMono-Regular,Menlo,monospace; overflow-wrap:anywhere; }
-.nav { display:flex; flex-wrap:wrap; gap:8px; margin-top:18px; }
-.nav a { text-decoration:none; color:var(--fg); background:var(--card); border:1px solid var(--border); border-radius:999px; padding:8px 12px; font-weight:700; }
-.grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:14px; }
-.two { display:grid; grid-template-columns:minmax(0,1.05fr) minmax(300px,.95fr); gap:16px; }
-.three { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:14px; }
-.card, .metric, .round, details { background:var(--card); border:1px solid var(--border); border-radius:20px; padding:18px; box-shadow:0 1px 2px rgba(15,23,42,.035); }
-.metric span { color:var(--muted); text-transform:uppercase; letter-spacing:.08em; font-size:12px; font-weight:800; }
-.metric b { display:block; margin-top:5px; font-size:26px; letter-spacing:-.035em; }
-.metric small { display:block; color:var(--muted); margin-top:4px; }
-.badge { display:inline-flex; align-items:center; border:1px solid var(--border); border-radius:999px; padding:5px 10px; font-size:12px; font-weight:850; text-transform:uppercase; letter-spacing:.06em; }
-.ok { color:var(--ok); } .warn { color:var(--warn); } .bad { color:var(--bad); }
-.badge.ok { background:color-mix(in srgb, var(--ok) 12%, transparent); } .badge.warn { background:color-mix(in srgb, var(--warn) 12%, transparent); } .badge.bad { background:color-mix(in srgb, var(--bad) 12%, transparent); }
-.callout { border-left:4px solid var(--accent); background:var(--card2); padding:14px 16px; border-radius:14px; }
-.callout.warn { border-left-color:var(--warn); }
-.callout.bad { border-left-color:var(--bad); }
-.score { display:flex; gap:10px; flex-wrap:wrap; margin-top:10px; }
-.pill { border:1px solid var(--border); border-radius:999px; background:var(--card2); padding:6px 10px; font-weight:750; font-size:13px; }
-.timeline { position:relative; display:grid; gap:14px; }
-.round header { display:flex; justify-content:space-between; gap:14px; flex-wrap:wrap; border-bottom:1px solid var(--border); padding-bottom:12px; margin-bottom:14px; }
-.arc { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:12px; }
-.arc div { background:var(--card2); border:1px solid var(--border); border-radius:16px; padding:14px; }
-.decision { display:grid; grid-template-columns:minmax(160px,.3fr) minmax(0,1fr); gap:10px 16px; align-items:start; }
-.decision dt { color:var(--muted); font-weight:850; text-transform:uppercase; letter-spacing:.08em; font-size:12px; }
-.decision dd { margin:0; }
-table { width:100%; border-collapse:collapse; min-width:820px; background:var(--card); }
-th,td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--border); vertical-align:top; }
-th { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.08em; background:var(--card2); }
-.table-wrap { overflow:auto; border:1px solid var(--border); border-radius:16px; }
-details { margin:14px 0; }
-summary { cursor:pointer; font-weight:850; display:flex; justify-content:space-between; gap:12px; }
-pre { white-space:pre-wrap; overflow:auto; background:color-mix(in srgb, var(--fg) 6%, transparent); padding:13px; border-radius:12px; border:1px solid var(--border); max-height:340px; }
-footer { margin-top:38px; padding-top:18px; border-top:1px solid var(--border); color:var(--muted); }
-@media (max-width: 860px) { main { padding:18px 13px 50px; } .hero { padding:21px; border-radius:22px; } .two { grid-template-columns:1fr; } .decision { grid-template-columns:1fr; } }
+
+/* ── Reset & base ───────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font: 15px/1.6 Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+}
+a { color: var(--link); }
+a:hover { text-decoration: underline; }
+h2 { font-size: 20px; font-weight: 700; letter-spacing: -.02em; margin-bottom: 14px; }
+h3 { font-size: 16px; font-weight: 700; margin-bottom: 8px; }
+p  { margin-bottom: .5em; }
+p:last-child { margin-bottom: 0; }
+ul, ol { padding-left: 1.3em; }
+li { margin: .25em 0; }
+code { font-family: var(--mono); font-size: .88em; }
+
+/* ── Layout ─────────────────────────────────────────────────────────── */
+main { max-width: 1120px; margin: 0 auto; padding: 28px 20px 72px; }
+section { margin-top: 36px; }
+
+/* ── Cards ───────────────────────────────────────────────────────────── */
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 18px 20px;
+  box-shadow: var(--shadow);
+}
+
+/* ── Grid helpers ────────────────────────────────────────────────────── */
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+.grid-auto { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
+@media (max-width: 720px) {
+  .grid-2, .grid-3 { grid-template-columns: 1fr; }
+}
+
+/* ── Status badges ───────────────────────────────────────────────────── */
+.badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 4px 10px; border-radius: 999px;
+  font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+  border: 1px solid transparent;
+}
+.badge-accept   { background: var(--accept-bg);   color: var(--accept-fg); }
+.badge-iterate  { background: var(--iterate-bg);  color: var(--iterate-fg); }
+.badge-reject   { background: var(--reject-bg);   color: var(--reject-fg); }
+.badge-degraded { background: var(--degraded-bg); color: var(--degraded-fg); }
+.badge-neutral  { background: var(--card2); color: var(--muted); border-color: var(--border); }
+
+/* ── Hero ────────────────────────────────────────────────────────────── */
+.hero {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 28px 28px 22px;
+  box-shadow: var(--shadow);
+}
+.hero-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+}
+.hero h1 {
+  font-size: clamp(22px, 3.5vw, 34px);
+  font-weight: 800;
+  letter-spacing: -.035em;
+  line-height: 1.1;
+  margin-bottom: 8px;
+}
+.hero-meta {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 22px;
+}
+.hero-meta .path {
+  font-family: var(--mono); font-size: 12px; color: var(--muted);
+}
+
+/* Why/How/What callout cards */
+.abstract-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.abstract-card {
+  background: var(--card2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 16px;
+}
+.abstract-label {
+  font-size: 11px; font-weight: 800; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--muted);
+  margin-bottom: 6px;
+}
+.abstract-card p { font-size: 14px; line-height: 1.55; }
+
+/* Convergence strip */
+.convergence-strip {
+  display: flex; gap: 18px; flex-wrap: wrap; align-items: center;
+  padding: 12px 14px;
+  background: var(--card2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin-bottom: 16px;
+}
+.conv-item { display: flex; flex-direction: column; }
+.conv-label { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .07em; }
+.conv-value { font-size: 18px; font-weight: 800; letter-spacing: -.02em; margin-top: 1px; }
+
+/* Expert verdict strip (compact, in hero) */
+.verdict-strip {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  margin-bottom: 18px;
+}
+.verdict-chip {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: var(--card2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 12px 6px 8px;
+  font-size: 13px; font-weight: 600;
+  text-decoration: none; color: var(--fg);
+  transition: border-color .15s;
+  cursor: pointer;
+}
+.verdict-chip:hover { border-color: var(--accent); text-decoration: none; }
+.verdict-chip .vc-name { font-weight: 700; }
+.verdict-chip .vc-concern {
+  color: var(--muted); font-size: 12px; font-weight: 400;
+  max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* Pickup command block */
+.pickup-block {
+  background: var(--card2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--iterate-fg);
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+}
+.pickup-block code {
+  flex: 1; font-size: 13px; color: var(--fg); word-break: break-all;
+}
+.btn-copy {
+  flex-shrink: 0;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 12px; font-weight: 700; cursor: pointer; color: var(--fg);
+  transition: background .15s;
+}
+.btn-copy:hover { background: var(--card2); }
+.btn-copy.copied { color: var(--accept-fg); border-color: var(--accept-fg); }
+
+/* ── Callout (blocker / warning) ────────────────────────────────────── */
+.callout {
+  padding: 14px 16px;
+  border-radius: 12px;
+  border-left: 4px solid transparent;
+  background: var(--card2);
+  border-color: var(--border);
+}
+.callout.iterate { border-left-color: var(--iterate-fg); background: var(--iterate-bg); color: var(--iterate-fg); }
+.callout.reject  { border-left-color: var(--reject-fg);  background: var(--reject-bg);  color: var(--reject-fg); }
+.callout.degraded{ border-left-color: var(--degraded-fg);background: var(--degraded-bg);color: var(--degraded-fg); }
+.callout p, .callout li { color: var(--fg); }
+.callout h3 { margin-bottom: 6px; }
+
+/* ── Intervention section ─────────────────────────────────────────────── */
+.intervention-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(260px, 1fr);
+  gap: 14px;
+}
+@media (max-width: 720px) { .intervention-grid { grid-template-columns: 1fr; } }
+
+/* ── Panel / expert cards ────────────────────────────────────────────── */
+.convergence-table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 10px 14px; text-align: left; border-bottom: 1px solid var(--border); font-size: 14px; vertical-align: middle; }
+th { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); background: var(--card2); }
+tr:last-child td { border-bottom: none; }
+
+.expert-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin-top: 20px; }
+.expert-card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 18px 20px; box-shadow: var(--shadow); scroll-margin-top: 80px; }
+.expert-card .ec-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; margin-bottom: 12px; }
+.expert-card .ec-name { font-size: 15px; font-weight: 800; }
+.expert-card .ec-stance { font-size: 13px; color: var(--muted); margin-bottom: 10px; }
+.expert-card .ec-concern { font-size: 14px; }
+.expert-card .ec-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); margin-bottom: 4px; margin-top: 12px; }
+
+/* ── Round arc ───────────────────────────────────────────────────────── */
+.round-arc { display: grid; gap: 14px; }
+.round-card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; box-shadow: var(--shadow); }
+.round-header {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  padding: 14px 18px;
+  background: var(--card2);
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  user-select: none;
+}
+.round-header:hover { background: var(--border); }
+.round-header .rh-left { display: flex; align-items: center; gap: 12px; }
+.round-num { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .09em; color: var(--muted); }
+.round-title { font-size: 15px; font-weight: 700; }
+.round-chevron { color: var(--muted); font-size: 14px; transition: transform .2s; }
+.round-header.open .round-chevron { transform: rotate(180deg); }
+.round-body { padding: 16px 18px; display: none; }
+.round-body.open { display: block; }
+.round-cols {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+@media (max-width: 720px) { .round-cols { grid-template-columns: 1fr; } }
+.round-col { background: var(--card2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+.round-col-label { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: 6px; }
+.round-col p { font-size: 14px; }
+
+/* ── Prior art ───────────────────────────────────────────────────────── */
+.prior-art-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+.prior-art-card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 16px 18px; box-shadow: var(--shadow); }
+.prior-art-card h3 { font-size: 14px; margin-bottom: 6px; }
+.prior-art-card p { font-size: 13px; color: var(--muted); }
+.prior-art-card a { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; font-weight: 600; margin-top: 8px; }
+
+/* ── Evidence ledger ─────────────────────────────────────────────────── */
+.ledger-tabs { display: flex; gap: 6px; margin-bottom: 14px; }
+.ledger-tab {
+  padding: 6px 14px; border-radius: 999px; font-size: 13px; font-weight: 700;
+  border: 1px solid var(--border); background: var(--card2); cursor: pointer; color: var(--fg);
+}
+.ledger-tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.ledger-view { display: none; }
+.ledger-view.active { display: block; }
+
+/* Summary ledger: opinion-focused */
+.ledger-summary-list { display: grid; gap: 10px; }
+.ledger-summary-item { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; display: grid; grid-template-columns: 140px 1fr auto; gap: 12px; align-items: start; }
+@media (max-width: 620px) { .ledger-summary-item { grid-template-columns: 1fr; } }
+.lsi-expert { font-weight: 700; font-size: 14px; }
+.lsi-round  { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.lsi-opinion { font-size: 14px; }
+
+/* Details ledger */
+.ledger-details-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; }
+
+/* ── Artifact summary placeholder ────────────────────────────────────── */
+.artifact-summary-placeholder {
+  background: var(--card2);
+  border: 2px dashed var(--border);
+  border-radius: 12px;
+  padding: 16px 18px;
+  margin-bottom: 16px;
+  color: var(--muted);
+  font-size: 14px;
+  font-style: italic;
+}
+.artifact-summary-placeholder strong { color: var(--fg); font-style: normal; }
+
+/* ── Raw artifact details ─────────────────────────────────────────────── */
+.raw-details { margin-top: 36px; }
+.raw-details > summary {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 16px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  cursor: pointer; font-weight: 700; font-size: 14px; color: var(--muted);
+  list-style: none;
+}
+.raw-details > summary::-webkit-details-marker { display: none; }
+.raw-details > summary::before { content: "▶"; font-size: 10px; transition: transform .2s; }
+.raw-details[open] > summary::before { transform: rotate(90deg); }
+.raw-details > summary:hover { color: var(--fg); }
+.raw-artifact-list { display: grid; gap: 12px; margin-top: 14px; }
+
+details.artifact-item {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+details.artifact-item > summary {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  padding: 12px 16px;
+  cursor: pointer; font-size: 14px; font-weight: 600;
+  list-style: none; color: var(--fg);
+}
+details.artifact-item > summary::-webkit-details-marker { display: none; }
+details.artifact-item > summary:hover { background: var(--card2); }
+.artifact-filename { font-family: var(--mono); font-size: 13px; color: var(--muted); }
+.artifact-content { padding: 0 16px 16px; border-top: 1px solid var(--border); }
+.artifact-content pre {
+  margin-top: 12px;
+  background: var(--card2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-x: auto;
+  max-height: 400px;
+}
+/* Markdown-style rendering for artifact content */
+.artifact-content .md-h2 { font-size: 16px; font-weight: 700; margin: 14px 0 6px; }
+.artifact-content .md-h3 { font-size: 14px; font-weight: 700; margin: 10px 0 4px; }
+.artifact-content .md-p  { font-size: 14px; margin-bottom: 6px; }
+.artifact-content .md-ul { padding-left: 1.2em; font-size: 14px; }
+.artifact-content .md-ul li { margin: 3px 0; }
+
+/* ── Footer ──────────────────────────────────────────────────────────── */
+footer {
+  margin-top: 48px; padding-top: 18px;
+  border-top: 1px solid var(--border);
+  color: var(--muted); font-size: 13px;
+  display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+}
+
+/* ── Utility ─────────────────────────────────────────────────────────── */
+.section-label {
+  font-size: 11px; font-weight: 800; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--muted); margin-bottom: 10px;
+}
+.divider { border: none; border-top: 1px solid var(--border); margin: 28px 0; }
 </style>
 </head>
 <body>
 <main>
-  <section class="hero" id="top">
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       HERO
+  ════════════════════════════════════════════════════════════════════ -->
+  <header class="hero" id="top">
+
+    <!-- Title + badge -->
     <div class="hero-top">
       <div>
-        <p class="eyebrow">Prototype · Pi workshop report</p>
-        <h1>ITERATE resolution</h1>
-        <p class="summary">The panel moved the idea in the right direction, but not to execution yet: the winning path is narrower, testable, and requires one human product decision before implementation.</p>
+        <h1>Workshop Security &amp; Release Readiness Review</h1>
+        <div class="hero-meta">
+          <span class="badge badge-iterate">ITERATE</span>
+          <span class="badge badge-neutral">Not converged</span>
+          <span class="path">.pi/workshops/20260602T-example-workshop/</span>
+        </div>
       </div>
-      <div><span class="badge warn">iterate</span> <span class="badge warn">not converged</span></div>
     </div>
-    <p class="path">.pi/workshops/20260602T-example-workshop/report.html</p>
-    <div class="grid">
-      <div class="metric"><span>Status</span><b class="warn">ITERATE</b><small>Promising, but revise before acting.</small></div>
-      <div class="metric"><span>Was direction right?</span><b class="ok">Mostly yes</b><small>The panel found a viable narrower framing.</small></div>
-      <div class="metric"><span>Human intervention</span><b class="warn">1 decision</b><small>Pick the target user / acceptance threshold.</small></div>
-      <div class="metric"><span>Evidence confidence</span><b>Medium</b><small>Good local evidence; no external benchmark yet.</small></div>
+
+    <!-- Why / How / What abstract -->
+    <div class="abstract-grid">
+      <div class="abstract-card">
+        <div class="abstract-label">Why</div>
+        <p>The extension is approaching public release and ships a privilege split between slash commands and LLM-callable tools. The security model, honest sandboxing claims, and first-user experience need independent stress-testing before the tag is cut.</p>
+      </div>
+      <div class="abstract-card">
+        <div class="abstract-label">How</div>
+        <p>Three expert panels reviewed the codebase across four rounds: a security architect assessed the slash/tool privilege boundary, a release DX critic evaluated the first-user experience, and a systems test engineer examined test coverage and failure modes.</p>
+      </div>
+      <div class="abstract-card">
+        <div class="abstract-label">What</div>
+        <p>The panel converged on ITERATE. The privilege split is defensible but needs one documentation fix. Artifact-contained claims are honest but must be worded more precisely. Two non-negotiable tests are missing. The first-user bounce risk is the missing-model error path.</p>
+      </div>
     </div>
-    <nav class="nav">
-      <a href="#summary">Summary</a><a href="#intervention">Intervention</a><a href="#arc">Discussion arc</a><a href="#conclusion">Conclusion</a><a href="#evidence">Evidence</a><a href="#raw">Raw artifacts</a>
-    </nav>
-  </section>
 
-  <section id="summary">
-    <h2>Executive summary</h2>
-    <div class="two">
-      <article class="card">
-        <h3>Direction the discussion took</h3>
-        <p>The original broad proposal was narrowed into a staged implementation with an explicit validation gate. Experts agreed the broad version was risky, but the constrained version is worth another pass.</p>
-        <div class="score"><span class="pill ok">Direction: right</span><span class="pill warn">Readiness: not yet</span><span class="pill">Confidence: medium</span></div>
-      </article>
-      <aside class="card">
-        <h3>Human-readable conclusion</h3>
-        <div class="callout warn"><strong>Do not implement the original proposal as-is.</strong> First choose the target user and success threshold, then rerun/pick up from Round 2.</div>
-        <dl class="decision">
-          <dt>Changed</dt><dd>From “build the whole system” to “prototype one narrow workflow with measurable acceptance criteria.”</dd>
-          <dt>Next step</dt><dd>Answer the open decision, then run `/workshop-pickup --rounds 2 ...`.</dd>
-        </dl>
-      </aside>
+    <!-- Convergence strip -->
+    <div class="convergence-strip">
+      <div class="conv-item">
+        <span class="conv-label">Verdict</span>
+        <span class="conv-value" style="color:var(--iterate-fg)">ITERATE</span>
+      </div>
+      <div class="conv-item">
+        <span class="conv-label">Rounds</span>
+        <span class="conv-value">4</span>
+      </div>
+      <div class="conv-item">
+        <span class="conv-label">Experts</span>
+        <span class="conv-value">3</span>
+      </div>
+      <div class="conv-item">
+        <span class="conv-label">Converged</span>
+        <span class="conv-value" style="color:var(--iterate-fg)">No</span>
+      </div>
+      <div class="conv-item">
+        <span class="conv-label">Duration</span>
+        <span class="conv-value">14 min</span>
+      </div>
     </div>
-  </section>
 
-  <section id="intervention">
-    <h2>Intervention required</h2>
-    <article class="card">
-      <p class="muted">This is the part a busy human should read first if they need to unblock the workshop.</p>
-      <ul>
-        <li><strong>Decision:</strong> choose whether the MVP optimizes expert speed or novice onboarding.</li>
-        <li><strong>Evidence gap:</strong> run one benchmark/prototype against the current workflow before acceptance.</li>
-        <li><strong>Rerun trigger:</strong> pick up the workshop after the decision; do not restart from scratch.</li>
-      </ul>
-    </article>
-  </section>
+    <!-- Expert verdict strip (compact; each chip scrolls to expert card) -->
+    <div class="section-label">Panel at a glance</div>
+    <div class="verdict-strip">
+      <a href="#expert-security" class="verdict-chip">
+        <span class="badge badge-iterate" style="font-size:10px">ITERATE</span>
+        <span class="vc-name">Security Architect</span>
+        <span class="vc-concern">privilege docs incomplete</span>
+      </a>
+      <a href="#expert-dx" class="verdict-chip">
+        <span class="badge badge-iterate" style="font-size:10px">ITERATE</span>
+        <span class="vc-name">Release DX Critic</span>
+        <span class="vc-concern">missing-model error unusable</span>
+      </a>
+      <a href="#expert-test" class="verdict-chip">
+        <span class="badge badge-iterate" style="font-size:10px">ITERATE</span>
+        <span class="vc-name">Systems Test Engineer</span>
+        <span class="vc-concern">two test categories absent</span>
+      </a>
+    </div>
 
-  <section id="arc">
-    <h2>Round-by-round discussion arc</h2>
-    <div class="timeline">
-      <article class="round">
-        <header><div><p class="eyebrow">Round 1</p><h3>Broad idea stress test</h3></div><span class="badge warn">unresolved</span></header>
-        <div class="arc">
-          <div><h4>Shared ground</h4><p>The problem is real; automation could help if scoped carefully.</p></div>
-          <div><h4>What moved</h4><p>Experts rejected the unbounded “do everything” form and proposed a narrower MVP.</p></div>
-          <div><h4>Still open</h4><p>Unclear target user and success threshold.</p></div>
+    <!-- Pickup command -->
+    <div class="section-label" style="margin-top:16px">Continue this workshop</div>
+    <div class="pickup-block">
+      <code id="pickup-cmd">/workshop-pickup --rounds 2 .pi/workshops/20260602T-example-workshop/</code>
+      <button class="btn-copy" onclick="copyPickup(this)">Copy</button>
+    </div>
+
+  </header><!-- /hero -->
+
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       INTERVENTION REQUIRED (shown only for ITERATE / REJECT / DEGRADED)
+  ════════════════════════════════════════════════════════════════════ -->
+  <section id="intervention" aria-labelledby="intervention-heading">
+    <h2 id="intervention-heading">🚧 Before you proceed</h2>
+
+    <div class="intervention-grid">
+      <!-- Blocking concern -->
+      <div>
+        <div class="callout iterate" style="margin-bottom:12px">
+          <h3>The single blocking concern</h3>
+          <p>The missing-model error path emits a raw internal exception instead of a user-facing message with the fix command. Any first user without a pre-configured model will bounce here before the extension does anything useful.</p>
         </div>
-      </article>
-      <article class="round">
-        <header><div><p class="eyebrow">Round 2</p><h3>Narrowed proposal evaluated</h3></div><span class="badge warn">iterate</span></header>
-        <div class="arc">
-          <div><h4>Shared ground</h4><p>The constrained workflow is technically feasible.</p></div>
-          <div><h4>What moved</h4><p>Discussion shifted from “should this exist?” to “what gate proves it is worth building?”</p></div>
-          <div><h4>Still open</h4><p>Need one product ruling and a measurable validation gate.</p></div>
+
+        <div class="card">
+          <h3>Decisions you need to make</h3>
+          <ul style="margin-top:8px">
+            <li>Rewrite the missing-model error to include the exact <code>pi --list-models</code> + config snippet needed to fix it.</li>
+            <li>Add an integration test: "run without strongModel configured, assert error message contains the fix command."</li>
+            <li>Add a policy clarification: "artifact-contained means files written by the tool; the subprocess itself is an unsandboxed local shell."</li>
+          </ul>
         </div>
-      </article>
+      </div>
+
+      <!-- Pickup command (repeated) -->
+      <div class="card" style="display:flex;flex-direction:column;gap:12px">
+        <h3>Pick up after resolving</h3>
+        <p style="font-size:14px;color:var(--muted)">Run this from your project directory once you've made the changes above. The workshop will load the previous synthesis and continue from Round 5.</p>
+        <div class="pickup-block">
+          <code>/workshop-pickup --rounds 2 .pi/workshops/20260602T-example-workshop/</code>
+          <button class="btn-copy" onclick="copyPickup(this)">Copy</button>
+        </div>
+        <p style="font-size:12px;color:var(--muted)">Or restart from scratch: <code>/workshop --rounds 4 &lt;idea&gt;</code></p>
+      </div>
     </div>
   </section>
 
-  <section id="conclusion">
-    <h2>Conclusions and action plan</h2>
-    <div class="three">
-      <article class="card"><h3>Strongest viable version</h3><p>A narrow workflow assistant that handles one high-frequency task, with explicit before/after time and error-rate measurements.</p></article>
-      <article class="card"><h3>Required revision</h3><ul><li>Define target user.</li><li>Define acceptance threshold.</li><li>Run one prototype/benchmark.</li></ul></article>
-      <article class="card"><h3>Action checklist</h3><ol><li>Answer the target-user question.</li><li>Draft acceptance criteria.</li><li>Pick up the workshop for two rounds.</li></ol></article>
-    </div>
-  </section>
 
-  <section id="evidence">
-    <h2>Evidence ledger</h2>
-    <div class="table-wrap">
+  <!-- ═══════════════════════════════════════════════════════════════════
+       PANEL — convergence table + expert cards
+  ════════════════════════════════════════════════════════════════════ -->
+  <section id="panel" aria-labelledby="panel-heading">
+    <h2 id="panel-heading">The panel</h2>
+
+    <!-- Convergence table -->
+    <div class="convergence-table-wrap">
       <table>
-        <thead><tr><th>Source</th><th>What it supports</th><th>Confidence</th><th>Human note</th></tr></thead>
+        <thead>
+          <tr>
+            <th>Expert</th>
+            <th>Stance</th>
+            <th>R1</th>
+            <th>R2</th>
+            <th>R3</th>
+            <th>R4</th>
+            <th>Final</th>
+          </tr>
+        </thead>
         <tbody>
-          <tr><td>domain expert</td><td>User need is plausible but narrower than original framing.</td><td><span class="badge ok">good</span></td><td>Useful strategic constraint.</td></tr>
-          <tr><td>scientific programmer</td><td>Implementation is feasible if interface is small and testable.</td><td><span class="badge ok">good</span></td><td>Turn into acceptance tests.</td></tr>
-          <tr><td>prototype scratch</td><td>Parser proof-of-concept works on small examples.</td><td><span class="badge warn">limited</span></td><td>Needs real workload benchmark.</td></tr>
-          <tr><td>child-run ledger</td><td>No blank child outputs detected in this prototype.</td><td><span class="badge ok">clean</span></td><td>Report is trustworthy.</td></tr>
+          <tr>
+            <td><strong>Security Architect</strong></td>
+            <td style="font-size:13px;color:var(--muted)">Owns privilege model &amp; attack surface</td>
+            <td><span class="badge badge-iterate" style="font-size:10px">ITERATE</span></td>
+            <td><span class="badge badge-iterate" style="font-size:10px">ITERATE</span></td>
+            <td><span class="badge badge-iterate" style="font-size:10px">ITERATE</span></td>
+            <td><span class="badge badge-iterate" style="font-size:10px">ITERATE</span></td>
+            <td><span class="badge badge-iterate">ITERATE</span></td>
+          </tr>
+          <tr>
+            <td><strong>Release DX Critic</strong></td>
+            <td style="font-size:13px;color:var(--muted)">Owns first-user experience &amp; bounce risk</td>
+            <td><span class="badge badge-iterate" style="font-size:10px">ITERATE</span></td>
+            <td><span class="badge badge-iterate" style="font-size:10px">ITERATE</span></td>
+            <td><span class="badge badge-iterate" style="font-size:10px">ITERATE</span></td>
+            <td><span class="badge badge-iterate" style="font-size:10px">ITERATE</span></td>
+            <td><span class="badge badge-iterate">ITERATE</span></td>
+          </tr>
+          <tr>
+            <td><strong>Systems Test Engineer</strong></td>
+            <td style="font-size:13px;color:var(--muted)">Owns test coverage &amp; failure mode safety</td>
+            <td><span class="badge badge-iterate" style="font-size:10px">ITERATE</span></td>
+            <td><span class="badge badge-iterate" style="font-size:10px">ITERATE</span></td>
+            <td><span class="badge badge-accept"  style="font-size:10px">ACCEPT</span></td>
+            <td><span class="badge badge-iterate" style="font-size:10px">ITERATE</span></td>
+            <td><span class="badge badge-iterate">ITERATE</span></td>
+          </tr>
         </tbody>
       </table>
     </div>
+
+    <!-- Expert detail cards -->
+    <div class="expert-cards">
+
+      <article class="expert-card" id="expert-security">
+        <div class="ec-header">
+          <span class="ec-name">Security Architect</span>
+          <span class="badge badge-iterate">ITERATE</span>
+        </div>
+        <div class="ec-stance">Owns privilege model &amp; attack surface</div>
+        <div class="ec-label">Key concern</div>
+        <p class="ec-concern">The slash/tool privilege split is defensible in principle, but the docs don't make it clear enough that slash commands are not a proof of human provenance — a sophisticated prompt injection could plausibly invoke them. The "artifact-contained, not sandboxed" claim needs a one-sentence explanation of exactly what it means.</p>
+        <div class="ec-label">What changed across rounds</div>
+        <p class="ec-concern" style="font-size:13px;color:var(--muted)">R1 flagged the broad privilege boundary. R2–R3 narrowed it to the documentation gap. R4 confirmed the implementation is correct but the user-facing language is insufficient.</p>
+      </article>
+
+      <article class="expert-card" id="expert-dx">
+        <div class="ec-header">
+          <span class="ec-name">Release DX Critic</span>
+          <span class="badge badge-iterate">ITERATE</span>
+        </div>
+        <div class="ec-stance">Owns first-user experience &amp; bounce risk</div>
+        <div class="ec-label">Key concern</div>
+        <p class="ec-concern">The missing-model error is the single highest-probability first-user bounce. The current error message is a raw internal exception. It must tell the user exactly what to do: run <code>pi --list-models</code>, then add the config snippet. Until this is fixed the extension should not be pointed at strangers.</p>
+        <div class="ec-label">What changed across rounds</div>
+        <p class="ec-concern" style="font-size:13px;color:var(--muted)">R1 identified 3 bounce risks. R2 ranked them. R3–R4 focused entirely on the missing-model path as the non-negotiable fix.</p>
+      </article>
+
+      <article class="expert-card" id="expert-test">
+        <div class="ec-header">
+          <span class="ec-name">Systems Test Engineer</span>
+          <span class="badge badge-iterate">ITERATE</span>
+        </div>
+        <div class="ec-stance">Owns test coverage &amp; failure mode safety</div>
+        <div class="ec-label">Key concern</div>
+        <p class="ec-concern">Two test categories are completely absent: (1) "run without model configured → assert actionable error", (2) "scratch policy revocation with simulated crash → assert policy is revoked on restart." Everything else in the test suite is adequate for beta.</p>
+        <div class="ec-label">What changed across rounds</div>
+        <p class="ec-concern" style="font-size:13px;color:var(--muted)">R3 briefly reached ACCEPT after confirming the module split had sufficient test coverage. R4 reopened when the two missing integration tests were surfaced — returned to ITERATE.</p>
+      </article>
+
+    </div>
   </section>
 
-  <section id="raw">
-    <h2>Raw artifacts</h2>
-    <details open><summary>Final synthesis <code>round_2_synthesis.md</code></summary><pre># Round 2 synthesis
 
-## Shared ground
-- ...
+  <!-- ═══════════════════════════════════════════════════════════════════
+       ROUND ARC
+  ════════════════════════════════════════════════════════════════════ -->
+  <section id="arc" aria-labelledby="arc-heading">
+    <h2 id="arc-heading">Round-by-round discussion arc</h2>
 
-## Report brief
-- Direction of discussion: ...
-- Final conclusion: ...
+    <div class="round-arc">
 
-STATUS: ITERATE
-CONVERGED: NO</pre></details>
-    <details><summary>Expert critique <code>round_2_scientific-programmer.md</code></summary><pre>## Blocking objections
-- Acceptance criteria are not measurable yet.
+      <div class="round-card">
+        <div class="round-header open" onclick="toggleRound(this)">
+          <div class="rh-left">
+            <span class="round-num">Round 1</span>
+            <span class="round-title">Broad stress-test — is the design defensible?</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span class="badge badge-iterate" style="font-size:10px">ITERATE</span>
+            <span class="round-chevron">▼</span>
+          </div>
+        </div>
+        <div class="round-body open">
+          <div class="round-cols">
+            <div class="round-col">
+              <div class="round-col-label">What the panel agreed on</div>
+              <p>The privilege split between slash commands and the LLM-callable tool is architecturally sound. The module refactor reduces complexity without hiding it. Artifact path hardening is correctly scoped to scratch writes.</p>
+            </div>
+            <div class="round-col">
+              <div class="round-col-label">What shifted this round</div>
+              <p>The original question "is this safe to ship?" was reframed to "what are the three non-negotiable fixes before shipping?" This narrowed the scope and made the remaining rounds more productive.</p>
+            </div>
+            <div class="round-col">
+              <div class="round-col-label">What remained open</div>
+              <p>Exact wording of the "artifact-contained" disclaimer. Whether the missing-model path is a hard blocker or an acceptable rough edge for a beta. Which tests are truly non-negotiable.</p>
+            </div>
+          </div>
+        </div>
+      </div>
 
-## Verdict
-VERDICT: ITERATE</pre></details>
+      <div class="round-card">
+        <div class="round-header" onclick="toggleRound(this)">
+          <div class="rh-left">
+            <span class="round-num">Round 2</span>
+            <span class="round-title">Ranking the blockers</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span class="badge badge-iterate" style="font-size:10px">ITERATE</span>
+            <span class="round-chevron">▼</span>
+          </div>
+        </div>
+        <div class="round-body">
+          <div class="round-cols">
+            <div class="round-col">
+              <div class="round-col-label">What the panel agreed on</div>
+              <p>Three issues ranked as blockers: (1) missing-model UX, (2) "artifact-contained" precision, (3) two missing integration tests. Everything else is post-beta polish.</p>
+            </div>
+            <div class="round-col">
+              <div class="round-col-label">What shifted this round</div>
+              <p>DX Critic elevated the missing-model path from "rough edge" to "hard blocker" after reviewing the exact error text. Security Architect accepted that the privilege split docs only need a one-sentence clarification, not a redesign.</p>
+            </div>
+            <div class="round-col">
+              <div class="round-col-label">What remained open</div>
+              <p>Whether the crash-recovery scratch policy revocation test is non-negotiable for beta or can be a post-beta issue. Test Engineer and DX Critic disagreed.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="round-card">
+        <div class="round-header" onclick="toggleRound(this)">
+          <div class="rh-left">
+            <span class="round-num">Round 3</span>
+            <span class="round-title">Brief convergence — module split assessed</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span class="badge badge-accept" style="font-size:10px">ACCEPT (partial)</span>
+            <span class="round-chevron">▼</span>
+          </div>
+        </div>
+        <div class="round-body">
+          <div class="round-cols">
+            <div class="round-col">
+              <div class="round-col-label">What the panel agreed on</div>
+              <p>The module split (schemas / config / artifacts) is genuine simplification, not window-dressing. Test coverage of the split is adequate. Test Engineer briefly moved to ACCEPT on this sub-question.</p>
+            </div>
+            <div class="round-col">
+              <div class="round-col-label">What shifted this round</div>
+              <p>Focused narrowly on the refactor quality question. The panel reached provisional agreement that the refactor is clean — which opened bandwidth to address the remaining two blockers in R4.</p>
+            </div>
+            <div class="round-col">
+              <div class="round-col-label">What remained open</div>
+              <p>The two integration tests and the "artifact-contained" wording still unresolved. Test Engineer's R3 ACCEPT was conditional on these being addressed — reverted to ITERATE when they weren't.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="round-card">
+        <div class="round-header" onclick="toggleRound(this)">
+          <div class="rh-left">
+            <span class="round-num">Round 4</span>
+            <span class="round-title">Final — three fixes, then ship</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span class="badge badge-iterate" style="font-size:10px">ITERATE</span>
+            <span class="round-chevron">▼</span>
+          </div>
+        </div>
+        <div class="round-body">
+          <div class="round-cols">
+            <div class="round-col">
+              <div class="round-col-label">What the panel agreed on</div>
+              <p>Three fixes are required before pointing the extension at strangers. After these three are done, all three experts indicated they would move to ACCEPT. The overall design is sound.</p>
+            </div>
+            <div class="round-col">
+              <div class="round-col-label">What shifted this round</div>
+              <p>Converged on the exact three-item checklist. The discussion moved from "is this shippable at all?" to "here are the three specific things to fix and how." This is a meaningful shift in confidence.</p>
+            </div>
+            <div class="round-col">
+              <div class="round-col-label">What remained open</div>
+              <p>The crash-recovery revocation test was deferred to post-beta by majority vote (2 vs 1). Test Engineer dissented but accepted the deferral as a documented risk.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
   </section>
 
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       PRIOR ART & RELATED WORK (web-research-conditional section)
+  ════════════════════════════════════════════════════════════════════ -->
+  <section id="prior-art" aria-labelledby="prior-art-heading">
+    <h2 id="prior-art-heading">Prior art &amp; related work</h2>
+    <p style="color:var(--muted);font-size:14px;margin-bottom:16px">Similar projects the panel found while researching this idea.</p>
+
+    <div class="prior-art-cards">
+      <div class="prior-art-card">
+        <h3>LangGraph Multi-Agent Supervisor</h3>
+        <p>LangChain's supervisor pattern runs N specialist agents and routes between them based on task type. The privilege boundary is handled by giving each agent a fixed tool subset at instantiation, not at call time — similar to the expert-tool scoping decision here.</p>
+        <a href="https://langchain-ai.github.io/langgraph/concepts/multi_agent/" target="_blank" rel="noopener">langgraph.io ↗</a>
+      </div>
+      <div class="prior-art-card">
+        <h3>AutoGen Agent Sandbox</h3>
+        <p>Microsoft's AutoGen v0.4 introduced a Docker-based code execution sandbox with explicit "allowed" vs "disallowed" tool registries per agent. The "artifact-contained, not sandboxed" framing here contrasts directly with AutoGen's stronger isolation — and the tradeoff is the same: sandboxing adds latency and setup cost.</p>
+        <a href="https://microsoft.github.io/autogen/stable/user-guide/core-user-guide/index.html" target="_blank" rel="noopener">microsoft.github.io ↗</a>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       EVIDENCE LEDGER
+  ════════════════════════════════════════════════════════════════════ -->
+  <section id="evidence" aria-labelledby="evidence-heading">
+    <h2 id="evidence-heading">Evidence ledger</h2>
+
+    <div class="ledger-tabs">
+      <button class="ledger-tab active" onclick="switchLedger('summary', this)">Summary view</button>
+      <button class="ledger-tab" onclick="switchLedger('details', this)">Details &amp; metrics</button>
+    </div>
+
+    <!-- Summary view: what experts thought about the idea -->
+    <div class="ledger-view active" id="ledger-summary">
+      <div class="ledger-summary-list">
+        <div class="ledger-summary-item">
+          <div>
+            <div class="lsi-expert">Security Architect</div>
+            <div class="lsi-round">Round 1–4 · Expert</div>
+          </div>
+          <div class="lsi-opinion">Privilege split is defensible but the documentation of the slash-vs-tool boundary needs a clear one-sentence disclaimer that slash commands are not a proof of human provenance. The "artifact-contained" claim is honest but too brief to be understood by first-time users.</div>
+          <span class="badge badge-iterate">ITERATE</span>
+        </div>
+        <div class="ledger-summary-item">
+          <div>
+            <div class="lsi-expert">Release DX Critic</div>
+            <div class="lsi-round">Round 1–4 · Expert</div>
+          </div>
+          <div class="lsi-opinion">The missing-model error is a hard blocker for anyone without prior Pi configuration. The error text currently exposes an internal exception path. Must be replaced with a user-facing message that includes the exact fix: list models, add config key.</div>
+          <span class="badge badge-iterate">ITERATE</span>
+        </div>
+        <div class="ledger-summary-item">
+          <div>
+            <div class="lsi-expert">Systems Test Engineer</div>
+            <div class="lsi-round">Round 1–4 · Expert</div>
+          </div>
+          <div class="lsi-opinion">Module split is well-tested and the refactor is genuine. Two integration tests are absent: (1) no-model error path, (2) crash-recovery policy revocation. First is non-negotiable for beta. Second was deferred by majority vote — documented as a known post-beta risk.</div>
+          <span class="badge badge-iterate">ITERATE</span>
+        </div>
+        <div class="ledger-summary-item">
+          <div>
+            <div class="lsi-expert">Synthesizer</div>
+            <div class="lsi-round">Round 4 · Synthesis</div>
+          </div>
+          <div class="lsi-opinion">All three experts agree the design is sound. The three blockers are specific, small, and fixable in a single sitting. After the fixes, re-run for two rounds to confirm. ITERATE verdict is about unfinished checklist items, not architectural problems.</div>
+          <span class="badge badge-iterate">ITERATE</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Details view: metrics, cost, tools -->
+    <div class="ledger-view" id="ledger-details">
+      <div class="ledger-details-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Expert / Role</th>
+              <th>Phase</th>
+              <th>Round</th>
+              <th>Status</th>
+              <th>Duration</th>
+              <th>Tool calls</th>
+              <th>Model</th>
+              <th>Input tokens</th>
+              <th>Output tokens</th>
+              <th>Cost</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Planner</strong></td>
+              <td><span class="badge badge-neutral" style="font-size:10px">planner</span></td>
+              <td>—</td>
+              <td>✓</td>
+              <td>23s</td>
+              <td>4</td>
+              <td style="font-size:12px;font-family:var(--mono)">claude-3-5-sonnet</td>
+              <td>12,400</td>
+              <td>890</td>
+              <td>$0.04</td>
+            </tr>
+            <tr>
+              <td><strong>Security Architect</strong></td>
+              <td><span class="badge badge-neutral" style="font-size:10px">expert</span></td>
+              <td>1–4</td>
+              <td>✓</td>
+              <td>3m 14s</td>
+              <td>18</td>
+              <td style="font-size:12px;font-family:var(--mono)">claude-3-5-sonnet</td>
+              <td>48,200</td>
+              <td>4,100</td>
+              <td>$0.22</td>
+            </tr>
+            <tr>
+              <td><strong>Release DX Critic</strong></td>
+              <td><span class="badge badge-neutral" style="font-size:10px">expert</span></td>
+              <td>1–4</td>
+              <td>✓</td>
+              <td>2m 58s</td>
+              <td>14</td>
+              <td style="font-size:12px;font-family:var(--mono)">claude-3-5-sonnet</td>
+              <td>44,100</td>
+              <td>3,800</td>
+              <td>$0.20</td>
+            </tr>
+            <tr>
+              <td><strong>Systems Test Engineer</strong></td>
+              <td><span class="badge badge-neutral" style="font-size:10px">expert</span></td>
+              <td>1–4</td>
+              <td>✓</td>
+              <td>3m 02s</td>
+              <td>16</td>
+              <td style="font-size:12px;font-family:var(--mono)">claude-3-5-sonnet</td>
+              <td>46,800</td>
+              <td>4,000</td>
+              <td>$0.21</td>
+            </tr>
+            <tr>
+              <td><strong>Synthesizer</strong></td>
+              <td><span class="badge badge-neutral" style="font-size:10px">synth</span></td>
+              <td>1–4</td>
+              <td>✓</td>
+              <td>1m 42s</td>
+              <td>0</td>
+              <td style="font-size:12px;font-family:var(--mono)">claude-3-5-sonnet</td>
+              <td>62,000</td>
+              <td>6,200</td>
+              <td>$0.31</td>
+            </tr>
+            <tr style="font-weight:700;background:var(--card2)">
+              <td colspan="7">Total</td>
+              <td>213,500</td>
+              <td>19,000</td>
+              <td>$0.98</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       RAW ARTIFACTS (collapsed by default)
+  ════════════════════════════════════════════════════════════════════ -->
+  <details class="raw-details" id="raw">
+    <summary>Raw artifacts — click to expand</summary>
+
+    <div style="margin-top:16px">
+      <!-- Agent summary placeholder -->
+      <div class="artifact-summary-placeholder">
+        <strong>Agent-generated artifact summary</strong> (5-sentence summary generated at report time) — <em>placeholder: backend post-processing step will fill this in. It will summarise all round synthesis files and resolution.md into a concise 5-sentence paragraph.</em>
+      </div>
+
+      <div class="raw-artifact-list">
+
+        <details class="artifact-item">
+          <summary>
+            <span>Final resolution</span>
+            <span class="artifact-filename">resolution.md</span>
+          </summary>
+          <div class="artifact-content">
+            <div class="md-h2">Shared ground</div>
+            <ul class="md-ul">
+              <li>The privilege split between slash commands and the LLM tool is architecturally correct.</li>
+              <li>The module refactor (schemas / config / artifacts) is genuine simplification.</li>
+              <li>The "artifact-contained" claim is accurate — but its wording is too terse for first users.</li>
+            </ul>
+            <div class="md-h2">Required idea revision</div>
+            <ul class="md-ul">
+              <li>Fix the missing-model error to emit an actionable message with the exact config snippet.</li>
+              <li>Add integration test: no-model path asserts user-facing error contains the fix command.</li>
+              <li>Add one-sentence privilege disclaimer to README and error output.</li>
+            </ul>
+            <div class="md-h2">Unresolved disagreements</div>
+            <ul class="md-ul">
+              <li>Crash-recovery scratch policy revocation test: Test Engineer wants it for beta; DX Critic and Security Architect voted to defer. Documented as known post-beta risk.</li>
+            </ul>
+            <div class="md-h2">Strongest viable version</div>
+            <p class="md-p">Ship as beta after the three-item checklist. Re-run workshop for two rounds to confirm. The design is sound; the blockers are small and specific.</p>
+            <pre>STATUS: ITERATE
+CONVERGED: NO</pre>
+          </div>
+        </details>
+
+        <details class="artifact-item">
+          <summary>
+            <span>Round 4 synthesis</span>
+            <span class="artifact-filename">round_4_synthesis.md</span>
+          </summary>
+          <div class="artifact-content">
+            <div class="md-h2">Round 4 synthesis</div>
+            <div class="md-h3">Shared ground</div>
+            <p class="md-p">All three experts agree the blockers are specific, small, and fixable. The design is not in question. ITERATE is about an unfinished checklist, not an architectural problem.</p>
+            <div class="md-h3">What moved this round</div>
+            <p class="md-p">Converged on the exact three-item list. Discussion shifted from open-ended critique to a specific, ordered action plan.</p>
+            <div class="md-h3">Open questions for user</div>
+            <ul class="md-ul">
+              <li>Do you want to address the crash-recovery revocation test before or after the beta tag?</li>
+            </ul>
+            <pre>STATUS: ITERATE
+CONVERGED: NO</pre>
+          </div>
+        </details>
+
+        <details class="artifact-item">
+          <summary>
+            <span>Workshop workflow &amp; config</span>
+            <span class="artifact-filename">workflow.md</span>
+          </summary>
+          <div class="artifact-content">
+            <pre>Profile: workshop
+Rounds: 4
+Web research: enabled
+Local bash: enabled (main experts only)
+Subagents: enabled
+Expert subagents: enabled
+Prototyping: enabled
+Strong model: claude-3-5-sonnet-20241022
+Expert model: claude-3-5-sonnet-20241022</pre>
+          </div>
+        </details>
+
+        <details class="artifact-item">
+          <summary>
+            <span>Security Architect — Round 1</span>
+            <span class="artifact-filename">round_1_extension-security-architect.md</span>
+          </summary>
+          <div class="artifact-content">
+            <div class="md-h2">Blocking objections</div>
+            <ul class="md-ul">
+              <li>The slash-vs-tool privilege split documentation does not state clearly enough that slash commands are not a proof of human provenance.</li>
+              <li>"Artifact-contained, not sandboxed" is honest but too compressed — first users will misread it as "safe."</li>
+            </ul>
+            <div class="md-h2">Non-blocking observations</div>
+            <ul class="md-ul">
+              <li>The <code>writeScratchFileNoSymlink</code> implementation is correctly hardened.</li>
+              <li>The generic <code>writeFileQueued</code> path trusts caller-supplied paths — acceptable for internal artifacts but should be noted in the security doc.</li>
+            </ul>
+            <pre>VERDICT: ITERATE</pre>
+          </div>
+        </details>
+
+      </div>
+    </div>
+  </details>
+
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       FOOTER
+  ════════════════════════════════════════════════════════════════════ -->
   <footer>
-    Prototype only. Backend should be adjusted to this layout only after review/approval.
+    <span>Generated by pi-workshop v0.2.2-beta · Node v22.19.0</span>
+    <span>Started 2026-06-02T14:30:00Z · Finished 2026-06-02T14:44:12Z · 14 min 12s</span>
   </footer>
+
 </main>
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     JavaScript
+════════════════════════════════════════════════════════════════════ -->
+<script>
+/* Copy pickup command */
+function copyPickup(btn) {
+  const cmd = document.getElementById('pickup-cmd')?.textContent
+    || btn.closest('.pickup-block')?.querySelector('code')?.textContent
+    || '';
+  navigator.clipboard.writeText(cmd.trim()).then(() => {
+    btn.textContent = 'Copied!';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 2000);
+  }).catch(() => {
+    btn.textContent = 'Copy';
+  });
+}
+
+/* Round arc toggle */
+function toggleRound(header) {
+  const body = header.nextElementSibling;
+  const isOpen = header.classList.contains('open');
+  header.classList.toggle('open', !isOpen);
+  body.classList.toggle('open', !isOpen);
+}
+
+/* Evidence ledger tab switch */
+function switchLedger(view, btn) {
+  document.querySelectorAll('.ledger-view').forEach(v => v.classList.remove('active'));
+  document.querySelectorAll('.ledger-tab').forEach(b => b.classList.remove('active'));
+  document.getElementById('ledger-' + view)?.classList.add('active');
+  btn.classList.add('active');
+}
+
+/* Smooth scroll for expert verdict chip links */
+document.querySelectorAll('.verdict-chip[href^="#"]').forEach(chip => {
+  chip.addEventListener('click', e => {
+    e.preventDefault();
+    const target = document.querySelector(chip.getAttribute('href'));
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+});
+
+/* Open first round by default */
+document.addEventListener('DOMContentLoaded', () => {
+  const firstHeader = document.querySelector('.round-header');
+  const firstBody = document.querySelector('.round-body');
+  if (firstHeader && firstBody) {
+    firstHeader.classList.add('open');
+    firstBody.classList.add('open');
+  }
+});
+</script>
 </body>
 </html>
