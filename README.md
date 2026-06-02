@@ -133,6 +133,10 @@ or `Ctrl+Alt+W`. The full-screen view has a top-left `✦ Observatory` title, an
 
 User-question rounds now open a full-screen **Workshop Q&A** surface. Select a question and type the answer directly — placeholders are dim hints, not text you need to delete. Press Enter to move to the next question/save when done, Ctrl+S to save, or Tab to open a small clarification helper agent seeded with the current synthesis/resolution context. In helper chat, ask what the question means, then press Tab/Ctrl+S to summarize that chat back into the selected answer. Answers are written to `user-answers.md` and treated as authoritative in later rounds.
 
+## HTML reports
+
+`--html-report` writes a polished self-contained `report.html`. The synthesizer is scaffolded to produce a report brief, and the HTML report renders an executive summary, direction-of-discussion narrative, human-intervention checklist, round-by-round discussion arc, final conclusions/action plan, child-run trust ledger, scratch evidence, and raw artifact archive. `DEGRADED` reports explicitly call out failed/blank child runs and recommend pickup from the last reliable synthesis.
+
 ## Scratch/prototype mode
 
 ```text

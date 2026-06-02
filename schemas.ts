@@ -82,7 +82,7 @@ export const WorkshopParams = Type.Object({
 	htmlReport: Type.Optional(
 		Type.Boolean({
 			description:
-				"Write a self-contained HTML report with workflow, research/prototype artifacts, critiques, synthesis, and final resolution. Default false for tool calls; --workshop enables it for slash commands.",
+				"Write a polished self-contained HTML report with executive summary, intervention checklist, discussion arc, evidence ledger, workflow, research/prototype artifacts, critiques, synthesis, and final resolution. Default false for tool calls; --workshop enables it for slash commands.",
 		}),
 	),
 	workshop: Type.Optional(
@@ -105,7 +105,7 @@ export const PublicWorkshopParams = Type.Object({
 	webResearch: Type.Optional(Type.Boolean({ description: "Allow web/doc/code-search tools for experts. Does not grant bash." })),
 	planExperts: Type.Optional(Type.Boolean({ description: "When experts are not provided, run a panel-designer pass to choose 2-4 expert roles. Default true." })),
 	subagents: Type.Optional(Type.Boolean({ description: "Run parent-orchestrated direct restricted scout/researcher briefs. Does not grant experts direct subagent access." })),
-	htmlReport: Type.Optional(Type.Boolean({ description: "Write a self-contained HTML report. Default false for assistant tool calls." })),
+	htmlReport: Type.Optional(Type.Boolean({ description: "Write a polished self-contained HTML report. Default false for assistant tool calls." })),
 });
 
 export type ExpertInput = Static<typeof ExpertSchema>;

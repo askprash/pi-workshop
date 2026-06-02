@@ -71,6 +71,10 @@ assert.ok(!index.includes('Type your answer or clarification here.'), 'question 
 assert.ok(index.includes('Start typing your answer…'), 'question UI renders placeholder as a hint outside saved answer text');
 assert.ok(index.includes('Current synthesis / resolution context'), 'question helper receives current synthesis context');
 assert.ok(index.includes('writeRunManifest'), 'manifest writer is present');
+assert.ok(index.includes('## Report brief') && index.includes('Direction of discussion') && index.includes('Next recommended action'), 'synthesizer is scaffolded to produce report-ready conclusions');
+assert.ok(index.includes('renderMarkdownLite') && index.includes('Executive summary') && index.includes('Discussion arc') && index.includes('Intervention required') && index.includes('Evidence ledger'), 'HTML report has polished human-readable sections beyond raw pre blocks');
+assert.ok(index.includes('renderChildRunLedger') && index.includes('Child-run issues'), 'HTML report surfaces child-run trust/degraded evidence');
+assert.ok(readme.includes('direction-of-discussion narrative') && readme.includes('child-run trust ledger'), 'README documents high-quality HTML report contents');
 assert.ok(index.includes('redactSensitiveForAudit'), 'tool-event audit previews redact sensitive fields');
 assert.ok(index.includes('argsPreview: previewUnknown(redactSensitiveForAudit('), 'tool-event args are redacted before manifest/dashboard preview');
 

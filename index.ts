@@ -785,6 +785,14 @@ Strict output format:
 ## Open questions for user
 - Q: ...
 
+## Report brief
+- Direction of discussion: one sentence explaining whether the workshop moved the idea toward acceptance, iteration, rejection, or clarification, and why.
+- Final conclusion: one sentence a busy human can act on without reading the raw transcript.
+- What changed from the original idea: one sentence naming the most important refinement, constraint, or reversal.
+- Human intervention required: yes/no plus the specific decision, evidence, rerun, or repair needed.
+- Confidence / evidence quality: one sentence about strength of evidence, missing evidence, tool/prototype reliability, or degraded-run caveats.
+- Next recommended action: one concrete next step.
+
 ## Resolution
 STATUS: ACCEPT | ITERATE | REJECT | ILL_POSED | UNRESOLVED
 CONVERGED: YES | NO
@@ -1022,7 +1030,7 @@ ${args.previousSynthesisPath ? `- Previous synthesis: ${args.previousSynthesisPa
 Critiques this round:
 ${args.critiquePaths.map((p) => `- ${p}`).join("\n")}
 
-Produce synthesis in strict format. Last two lines must be STATUS then CONVERGED.`;
+Produce synthesis in strict format. Make the Report brief readable to a human who did not attend the workshop: direction, conclusion, intervention, confidence, and next action must be concrete rather than generic. Last two lines must be STATUS then CONVERGED.`;
 }
 
 function parseStatus(text: string): ResolutionStatus {
@@ -1065,6 +1073,303 @@ async function formatTranscript(roundFiles: string[], finalSynthesis: string): P
 	return chunks.join("\n");
 }
 
+type ReportArtifactKind = "planner" | "workflow" | "assistant-brief" | "expert" | "synthesis" | "other";
+type ReportArtifact = { file: string; rel: string; name: string; kind: ReportArtifactKind; round?: number; expert?: string; content: string };
+type ReportRound = { round: number; synthesis?: ReportArtifact; experts: ReportArtifact[]; briefs: ReportArtifact[] };
+
+type ReportBrief = {
+	direction?: string;
+	conclusion?: string;
+	changed?: string;
+	intervention?: string;
+	confidence?: string;
+	nextAction?: string;
+};
+
+const REPORT_TEXT_EXTENSIONS = new Set([".md", ".txt", ".json", ".jsonl", ".py", ".ts", ".js", ".jl", ".rs", ".go", ".java", ".c", ".cpp", ".h", ".hpp", ".csv", ".log"]);
+
+function normalizeReportHeading(text: string): string {
+	return text.toLowerCase().replace(/[`*_#]/g, "").replace(/\s+/g, " ").trim();
+}
+
+function escapeRegExp(text: string): string {
+	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function stripMarkdownForSnippet(markdown: string, max = 260): string {
+	const text = markdown
+		.replace(/```[\s\S]*?```/g, " ")
+		.replace(/^#{1,6}\s+/gm, "")
+		.replace(/^\s*[-*]\s+/gm, "")
+		.replace(/^\s*\d+[.)]\s+/gm, "")
+		.replace(/\*\*|__|`/g, "")
+		.replace(/\s+/g, " ")
+		.trim();
+	return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text;
+}
+
+function extractMarkdownSection(markdown: string, headings: string | string[]): string {
+	const targets = new Set((Array.isArray(headings) ? headings : [headings]).map(normalizeReportHeading));
+	const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+	const captured: string[] = [];
+	let capturing = false;
+	let captureLevel = 0;
+	for (const line of lines) {
+		const match = line.match(/^(#{1,6})\s+(.+?)\s*$/);
+		if (match) {
+			const level = match[1].length;
+			const heading = normalizeReportHeading(match[2]);
+			if (capturing && level <= captureLevel) break;
+			if (!capturing && targets.has(heading)) {
+				capturing = true;
+				captureLevel = level;
+				continue;
+			}
+		}
+		if (capturing) captured.push(line);
+	}
+	return captured.join("\n").trim();
+}
+
+function extractListItems(markdown: string, max = 8): string[] {
+	const items: string[] = [];
+	for (const line of markdown.split("\n")) {
+		const match = line.match(/^\s*(?:[-*]|\d+[.)])\s+(.+)\s*$/);
+		if (!match) continue;
+		const item = match[1].replace(/^Q:\s*/i, "").trim();
+		if (!item || /^none\b/i.test(item)) continue;
+		items.push(item);
+		if (items.length >= max) return items;
+	}
+	if (!items.length) {
+		const fallback = markdown.split(/\n{2,}/).map((part) => stripMarkdownForSnippet(part, 220)).filter((part) => part && !/^none\b/i.test(part));
+		items.push(...fallback.slice(0, max));
+	}
+	return items;
+}
+
+function reportBriefValue(section: string, label: string): string | undefined {
+	const pattern = new RegExp(`^\\s*(?:[-*]\\s*)?${escapeRegExp(label)}\\s*:\\s*(.+?)\\s*$`, "im");
+	return section.match(pattern)?.[1]?.trim();
+}
+
+function parseReportBrief(final: string): ReportBrief {
+	const section = extractMarkdownSection(final, ["Report brief", "Report-ready summary", "Executive report brief"]);
+	if (!section) return {};
+	return {
+		direction: reportBriefValue(section, "Direction of discussion"),
+		conclusion: reportBriefValue(section, "Final conclusion"),
+		changed: reportBriefValue(section, "What changed from the original idea"),
+		intervention: reportBriefValue(section, "Human intervention required"),
+		confidence: reportBriefValue(section, "Confidence / evidence quality"),
+		nextAction: reportBriefValue(section, "Next recommended action"),
+	};
+}
+
+function renderInlineMarkdown(text: string): string {
+	let html = escapeHtml(text);
+	html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
+	html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+	html = html.replace(/__([^_]+)__/g, "<strong>$1</strong>");
+	html = html.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+	return html;
+}
+
+function renderMarkdownLite(markdown: string, empty = "No material recorded."): string {
+	const text = markdown.trim();
+	if (!text) return `<p class="muted">${escapeHtml(empty)}</p>`;
+	const html: string[] = [];
+	const lines = text.replace(/\r\n/g, "\n").split("\n");
+	let inCode = false;
+	let codeLines: string[] = [];
+	let listMode: "ul" | "ol" | undefined;
+	const closeList = () => {
+		if (!listMode) return;
+		html.push(`</${listMode}>`);
+		listMode = undefined;
+	};
+	const openList = (mode: "ul" | "ol") => {
+		if (listMode === mode) return;
+		closeList();
+		listMode = mode;
+		html.push(`<${mode}>`);
+	};
+	for (const line of lines) {
+		if (/^\s*```/.test(line)) {
+			if (inCode) {
+				html.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+				codeLines = [];
+				inCode = false;
+			} else {
+				closeList();
+				inCode = true;
+			}
+			continue;
+		}
+		if (inCode) {
+			codeLines.push(line);
+			continue;
+		}
+		if (!line.trim()) {
+			closeList();
+			continue;
+		}
+		const heading = line.match(/^(#{1,4})\s+(.+)\s*$/);
+		if (heading) {
+			closeList();
+			const level = Math.min(4, heading[1].length + 2);
+			html.push(`<h${level}>${renderInlineMarkdown(heading[2].trim())}</h${level}>`);
+			continue;
+		}
+		const bullet = line.match(/^\s*[-*]\s+(.+)\s*$/);
+		if (bullet) {
+			openList("ul");
+			html.push(`<li>${renderInlineMarkdown(bullet[1].trim())}</li>`);
+			continue;
+		}
+		const numbered = line.match(/^\s*\d+[.)]\s+(.+)\s*$/);
+		if (numbered) {
+			openList("ol");
+			html.push(`<li>${renderInlineMarkdown(numbered[1].trim())}</li>`);
+			continue;
+		}
+		closeList();
+		html.push(`<p>${renderInlineMarkdown(line.trim())}</p>`);
+	}
+	closeList();
+	if (inCode) html.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+	return html.join("\n");
+}
+
+function reportArtifactKind(file: string): Omit<ReportArtifact, "file" | "rel" | "content"> {
+	const name = path.basename(file);
+	let match = name.match(/^round_(\d+)_synthesis\.md$/);
+	if (match) return { name, kind: "synthesis", round: Number(match[1]) };
+	match = name.match(/^round_(\d+)_(.+)_assistant_brief(?:_error)?\.md$/);
+	if (match) return { name, kind: "assistant-brief", round: Number(match[1]), expert: match[2] };
+	match = name.match(/^round_(\d+)_(.+)\.md$/);
+	if (match) return { name, kind: "expert", round: Number(match[1]), expert: match[2] };
+	if (name === "panel-plan.md") return { name, kind: "planner" };
+	if (name === "workflow.md") return { name, kind: "workflow" };
+	return { name, kind: "other" };
+}
+
+function reportRounds(artifacts: ReportArtifact[]): ReportRound[] {
+	const byRound = new Map<number, ReportRound>();
+	const ensure = (round: number) => {
+		let entry = byRound.get(round);
+		if (!entry) {
+			entry = { round, experts: [], briefs: [] };
+			byRound.set(round, entry);
+		}
+		return entry;
+	};
+	for (const artifact of artifacts) {
+		if (!artifact.round) continue;
+		const round = ensure(artifact.round);
+		if (artifact.kind === "synthesis") round.synthesis = artifact;
+		else if (artifact.kind === "assistant-brief") round.briefs.push(artifact);
+		else if (artifact.kind === "expert") round.experts.push(artifact);
+	}
+	return [...byRound.values()].sort((a, b) => a.round - b.round);
+}
+
+function statusTone(status: ResolutionStatus): "ok" | "warn" | "bad" | "neutral" {
+	if (status === "ACCEPT") return "ok";
+	if (status === "REJECT" || status === "FAILED" || status === "CANCELLED") return "bad";
+	if (status === "ITERATE" || status === "UNRESOLVED" || status === "DEGRADED" || status === "ILL_POSED") return "warn";
+	return "neutral";
+}
+
+function statusMeaning(status: ResolutionStatus, converged: boolean): string {
+	if (status === "ACCEPT") return converged ? "Accepted: the panel believes the revised direction is ready for execution with testable criteria." : "Accepted signal, but convergence was not fully established; review unresolved material before acting.";
+	if (status === "ITERATE") return "Promising but not ready: revise the idea, tests, or sequencing before treating it as accepted.";
+	if (status === "REJECT") return "Rejected: the panel found the core premise, cost, or risk profile unsuitable in this framing.";
+	if (status === "ILL_POSED") return "Ill-posed: key terms, goals, or constraints must be clarified before useful evaluation can continue.";
+	if (status === "DEGRADED") return "Degraded: the run hit reliability issues; use the last reliable synthesis and inspect failures before proceeding.";
+	if (status === "CANCELLED") return "Cancelled: the report captures partial artifacts only.";
+	if (status === "FAILED") return "Failed: the run did not produce a trustworthy resolution.";
+	return "Unresolved: material disagreement or unanswered user questions remain.";
+}
+
+function defaultNextAction(status: ResolutionStatus): string {
+	if (status === "ACCEPT") return "Proceed with the strongest viable version and turn acceptance criteria into implementation checks.";
+	if (status === "ITERATE") return "Revise the idea using the required changes, then rerun or pick up the workshop.";
+	if (status === "REJECT") return "Do not execute this framing; either abandon it or return with a materially different premise.";
+	if (status === "ILL_POSED") return "Define terms, constraints, stakeholders, and success criteria before another workshop round.";
+	if (status === "DEGRADED") return "Inspect failure markers and pick up from the last reliable synthesis rather than the degraded artifact.";
+	return "Resolve open questions/disagreements, then run another round.";
+}
+
+function artifactHref(rel: string): string {
+	return escapeHtml(encodeURI(rel).replace(/#/g, "%23"));
+}
+
+function reportDisplayName(text: string): string {
+	return text.replace(/[-_]+/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function renderMetric(label: string, value: string, tone: "ok" | "warn" | "bad" | "neutral" = "neutral", hint?: string): string {
+	return `<div class="metric metric-${tone}"><span>${escapeHtml(label)}</span><b>${escapeHtml(value)}</b>${hint ? `<small>${escapeHtml(hint)}</small>` : ""}</div>`;
+}
+
+function renderBadge(text: string, tone: "ok" | "warn" | "bad" | "neutral" = "neutral"): string {
+	return `<span class="badge badge-${tone}">${escapeHtml(text)}</span>`;
+}
+
+function renderList(items: string[], empty = "No items recorded."): string {
+	if (!items.length) return `<p class="muted">${escapeHtml(empty)}</p>`;
+	return `<ul>${items.map((item) => `<li>${renderInlineMarkdown(item)}</li>`).join("\n")}</ul>`;
+}
+
+function renderArtifactDetails(artifact: ReportArtifact, title?: string): string {
+	return `<details class="artifact"><summary><span>${escapeHtml(title ?? artifact.name)}</span><code>${escapeHtml(artifact.rel)}</code></summary><pre>${escapeHtml(artifact.content)}</pre></details>`;
+}
+
+function renderExpertCard(artifact: ReportArtifact): string {
+	const verdict = artifact.content.match(/^VERDICT:\s*(.+?)\s*$/im)?.[1]?.trim() ?? "not stated";
+	const blockers = extractListItems(extractMarkdownSection(artifact.content, "Blocking objections"), 5);
+	const strongest = extractMarkdownSection(artifact.content, "Strongest viable version");
+	const required = extractListItems(extractMarkdownSection(artifact.content, "Required revision to idea"), 4);
+	const tone: "ok" | "warn" | "bad" | "neutral" = verdict === "ACCEPT" ? "ok" : verdict === "REJECT" || verdict === "ILL_POSED" ? "bad" : verdict === "not stated" ? "neutral" : "warn";
+	return `<article class="expert-card">
+		<header><h4>${escapeHtml(reportDisplayName(artifact.expert ?? artifact.name))}</h4>${renderBadge(verdict, tone)}</header>
+		<div class="mini-grid"><div><h5>Strongest viable version</h5>${renderMarkdownLite(strongest, "No strongest-version text recorded.")}</div><div><h5>Blocking objections</h5>${renderList(blockers)}</div><div><h5>Required revision</h5>${renderList(required)}</div></div>
+		${renderArtifactDetails(artifact, "Full critique")}
+	</article>`;
+}
+
+function renderRoundCard(round: ReportRound): string {
+	const synthesis = round.synthesis?.content ?? "";
+	const status = synthesis ? parseStatus(synthesis) : "UNRESOLVED";
+	const converged = synthesis ? parseConverged(synthesis) : false;
+	const shared = extractMarkdownSection(synthesis, "Shared ground");
+	const resolved = extractMarkdownSection(synthesis, "Resolved disagreements");
+	const unresolved = extractMarkdownSection(synthesis, "Unresolved disagreements");
+	const questions = extractQuestions(synthesis);
+	return `<section class="round-card" id="round-${round.round}">
+		<header><div><p class="eyebrow">Round ${round.round}</p><h3>Discussion arc</h3></div><div class="round-badges">${renderBadge(status, statusTone(status))}${renderBadge(converged ? "converged" : "not converged", converged ? "ok" : "warn")}</div></header>
+		<div class="arc-grid">
+			<div><h4>Shared ground</h4>${renderMarkdownLite(shared)}</div>
+			<div><h4>What moved</h4>${renderMarkdownLite(resolved)}</div>
+			<div><h4>Still open</h4>${renderMarkdownLite(unresolved || questions.map((q) => `- ${q}`).join("\n"), "No unresolved disagreements or user questions recorded.")}</div>
+		</div>
+		${round.experts.length ? `<details class="expert-rollup"><summary>Expert positions (${round.experts.length})</summary>${round.experts.map(renderExpertCard).join("\n")}</details>` : ""}
+		${round.briefs.length ? `<details class="artifact"><summary>Assistant briefs (${round.briefs.length})</summary>${round.briefs.map((brief) => renderArtifactDetails(brief, reportDisplayName(brief.expert ?? brief.name))).join("\n")}</details>` : ""}
+		${round.synthesis ? renderArtifactDetails(round.synthesis, "Full round synthesis") : ""}
+	</section>`;
+}
+
+function renderChildRunLedger(childRuns: ChildRun[]): string {
+	if (!childRuns.length) return `<p class="muted">No child-run ledger was available before manifest generation.</p>`;
+	const rows = childRuns.map((run) => {
+		const ok = run.exitCode === 0 && !run.timedOut && !run.aborted && Boolean(run.text.trim());
+		const tone = ok ? "ok" : "bad";
+		return `<tr><td>${escapeHtml(run.name)}</td><td>${escapeHtml(run.phase ?? "unknown")}</td><td>${escapeHtml(String(run.round ?? "—"))}</td><td>${renderBadge(ok ? "ok" : "issue", tone)}</td><td>${escapeHtml(String(run.exitCode))}</td><td>${escapeHtml(run.timedOut ? "yes" : "no")}</td><td>${escapeHtml(String(run.durationMs ?? "—"))}</td><td>${escapeHtml(String(run.toolEvents?.length ?? 0))}</td><td>${escapeHtml(firstMeaningfulLine(run.text, 160))}</td></tr>`;
+	}).join("\n");
+	return `<div class="table-wrap"><table><thead><tr><th>Child</th><th>Phase</th><th>Round</th><th>Trust</th><th>Exit</th><th>Timeout</th><th>ms</th><th>Tools</th><th>Preview</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
 async function generateHtmlReport(args: {
 	workshopDir: string;
 	ideaPath: string;
@@ -1074,64 +1379,152 @@ async function generateHtmlReport(args: {
 	transcriptPath: string;
 	roundFiles: string[];
 	result: Omit<WorkshopResult, "summary" | "reportPath">;
+	childRuns?: ChildRun[];
+	errors?: string[];
 }): Promise<string> {
 	const reportPath = path.join(args.workshopDir, "report.html");
 	const scratchRoot = path.join(args.workshopDir, "scratch");
-	const scratchFiles = (await listFilesRecursive(scratchRoot)).filter((file) => file.endsWith(".md") || file.endsWith(".py") || file.endsWith(".ts") || file.endsWith(".js") || file.endsWith(".txt"));
+	const scratchFiles = fssync.existsSync(scratchRoot)
+		? (await listFilesRecursive(scratchRoot)).filter((file) => REPORT_TEXT_EXTENSIONS.has(path.extname(file).toLowerCase()))
+		: [];
 	const read = async (file: string) => fs.readFile(file, "utf8").catch((err) => `[could not read ${file}: ${String(err)}]`);
 	const idea = await read(args.ideaPath);
 	const workflow = await read(args.workflowPath);
 	const answers = await read(args.answersPath);
 	const final = await read(args.finalPath);
-	const fileSection = async (title: string, files: string[]) => {
-		const parts: string[] = [];
-		for (const file of files) {
-			const content = await read(file);
-			parts.push(`<details><summary>${escapeHtml(title)}: ${escapeHtml(path.relative(args.workshopDir, file))}</summary><pre>${escapeHtml(content)}</pre></details>`);
-		}
-		return parts.join("\n");
-	};
+	const artifactFiles = [...new Set(args.roundFiles)];
+	const artifacts: ReportArtifact[] = [];
+	for (const file of artifactFiles) {
+		const rel = path.relative(args.workshopDir, file);
+		artifacts.push({ file, rel, content: await read(file), ...reportArtifactKind(file) });
+	}
+	const rounds = reportRounds(artifacts);
+	const reportBrief = parseReportBrief(final);
+	const status = args.result.status;
+	const tone = statusTone(status);
+	const strongest = extractMarkdownSection(final, "Strongest viable version");
+	const requiredRevision = extractMarkdownSection(final, "Required idea revision");
+	const sharedGround = extractMarkdownSection(final, "Shared ground");
+	const resolvedDisagreements = extractMarkdownSection(final, "Resolved disagreements");
+	const unresolvedDisagreements = extractMarkdownSection(final, "Unresolved disagreements");
+	const openQuestions = extractQuestions(final);
+	const errors = args.errors ?? [];
+	const childRuns = args.childRuns ?? [];
+	const failingRuns = childRuns.filter((run) => run.exitCode !== 0 || run.timedOut || run.aborted || !run.text.trim());
+	const interventions = [
+		...errors.map((error) => `Run issue: ${error}`),
+		...extractListItems(unresolvedDisagreements, 8).map((item) => `Resolve disagreement: ${item}`),
+		...openQuestions.map((question) => `Answer open question: ${question}`),
+		...(status === "ITERATE" ? extractListItems(requiredRevision, 8).map((item) => `Apply required revision: ${item}`) : []),
+		...(status === "DEGRADED" ? ["Pick up from the last reliable synthesis after inspecting failure markers."] : []),
+	];
+	const actionItems = [
+		reportBrief.nextAction,
+		...extractListItems(requiredRevision, 8),
+		...(openQuestions.length ? openQuestions.map((question) => `Decide: ${question}`) : []),
+	].filter((item): item is string => Boolean(item?.trim()));
+	const direction = reportBrief.direction || stripMarkdownForSnippet(sharedGround || strongest || final, 360) || statusMeaning(status, args.result.converged);
+	const conclusion = reportBrief.conclusion || stripMarkdownForSnippet(strongest || requiredRevision || final, 360);
+	const changed = reportBrief.changed || stripMarkdownForSnippet(requiredRevision || resolvedDisagreements, 300) || "No explicit change-from-original section was produced.";
+	const confidence = reportBrief.confidence || (failingRuns.length ? `Lower confidence: ${failingRuns.length} child run(s) had trust issues.` : args.result.converged ? "Higher confidence: the panel converged and no child-run trust issue was recorded." : "Moderate confidence: useful synthesis exists, but convergence was not reached.");
+	const interventionLabel = reportBrief.intervention || (interventions.length ? "Yes — review the intervention list before acting." : "No blocking human intervention was identified by the report generator.");
 	const html = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Pi workshop report — ${escapeHtml(args.result.status)}</title>
+<title>Pi workshop report — ${escapeHtml(status)}</title>
 <style>
-:root { color-scheme: light dark; --fg:#172033; --muted:#657084; --bg:#f6f8fb; --card:#fff; --border:#d8dee9; --accent:#3b82f6; --ok:#16a34a; --warn:#d97706; }
-@media (prefers-color-scheme: dark) { :root { --fg:#e5e7eb; --muted:#9ca3af; --bg:#111827; --card:#1f2937; --border:#374151; --accent:#60a5fa; --ok:#22c55e; --warn:#f59e0b; } }
-body { margin:0; font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--fg); background:var(--bg); }
-main { max-width:1120px; margin:0 auto; padding:32px 20px 64px; }
-h1,h2,h3 { line-height:1.15; }
-.card, details { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:16px; margin:16px 0; box-shadow:0 1px 2px rgba(0,0,0,.04); }
-.grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; }
-.metric { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:14px; }
-.metric b { display:block; font-size:20px; color:var(--accent); }
-pre { white-space:pre-wrap; overflow:auto; background:rgba(127,127,127,.10); padding:12px; border-radius:8px; }
-summary { cursor:pointer; font-weight:650; }
-.path { color:var(--muted); font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px; }
-.badge { display:inline-block; padding:3px 8px; border-radius:999px; background:rgba(59,130,246,.14); color:var(--accent); font-weight:650; }
-.ok { color:var(--ok); } .warn { color:var(--warn); }
+:root { color-scheme: light dark; --fg:#152033; --muted:#667085; --subtle:#8492a6; --bg:#f4f7fb; --card:#ffffff; --card2:#f8fafc; --border:#d9e2ec; --accent:#4f46e5; --accent2:#06b6d4; --ok:#15803d; --warn:#b45309; --bad:#b91c1c; --shadow:0 18px 50px rgba(15,23,42,.09); }
+@media (prefers-color-scheme: dark) { :root { --fg:#e5edf7; --muted:#a8b3c4; --subtle:#7c8797; --bg:#0b1020; --card:#111827; --card2:#172033; --border:#293449; --accent:#8b5cf6; --accent2:#22d3ee; --ok:#4ade80; --warn:#fbbf24; --bad:#fb7185; --shadow:0 18px 50px rgba(0,0,0,.38); } }
+* { box-sizing:border-box; } body { margin:0; font:15px/1.55 Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color:var(--fg); background:radial-gradient(circle at top left, rgba(79,70,229,.16), transparent 34rem), var(--bg); }
+a { color:var(--accent); } main { max-width:1240px; margin:0 auto; padding:30px 22px 70px; }
+.hero { border:1px solid var(--border); border-radius:28px; background:linear-gradient(135deg, rgba(79,70,229,.18), rgba(6,182,212,.10)), var(--card); padding:28px; box-shadow:var(--shadow); }
+.hero-top { display:flex; justify-content:space-between; gap:20px; align-items:flex-start; flex-wrap:wrap; } .eyebrow { margin:0 0 6px; color:var(--accent); text-transform:uppercase; letter-spacing:.12em; font-weight:800; font-size:12px; }
+h1 { margin:0; font-size:clamp(30px, 4vw, 52px); line-height:1.02; letter-spacing:-.04em; } h2 { font-size:25px; margin:34px 0 12px; letter-spacing:-.02em; } h3 { margin:0; font-size:20px; } h4 { margin:0 0 8px; } h5 { margin:0 0 6px; color:var(--muted); text-transform:uppercase; letter-spacing:.08em; font-size:11px; }
+.path { color:var(--muted); font-family:ui-monospace,SFMono-Regular,Menlo,monospace; overflow-wrap:anywhere; } .summary { font-size:18px; max-width:850px; color:var(--fg); }
+.grid, .metric-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:14px; } .metric { background:var(--card); border:1px solid var(--border); border-radius:18px; padding:15px; } .metric span { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.08em; font-weight:750; } .metric b { display:block; margin-top:5px; font-size:25px; letter-spacing:-.03em; } .metric small { color:var(--muted); display:block; margin-top:5px; }
+.metric-ok b, .ok { color:var(--ok); } .metric-warn b, .warn { color:var(--warn); } .metric-bad b, .bad { color:var(--bad); }
+.card, .round-card, details.artifact, .expert-card { background:var(--card); border:1px solid var(--border); border-radius:20px; padding:18px; margin:14px 0; box-shadow:0 1px 2px rgba(15,23,42,.035); } .card.emphasis { border-color:color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.badge { display:inline-flex; align-items:center; gap:6px; border:1px solid var(--border); border-radius:999px; padding:5px 10px; font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:.06em; } .badge-ok { color:var(--ok); background:color-mix(in srgb, var(--ok) 12%, transparent); } .badge-warn { color:var(--warn); background:color-mix(in srgb, var(--warn) 12%, transparent); } .badge-bad { color:var(--bad); background:color-mix(in srgb, var(--bad) 12%, transparent); } .badge-neutral { color:var(--muted); background:var(--card2); }
+.report-nav { display:flex; flex-wrap:wrap; gap:8px; margin:18px 0 0; } .report-nav a { text-decoration:none; border:1px solid var(--border); background:var(--card); color:var(--fg); padding:8px 11px; border-radius:999px; font-weight:650; }
+.two-col { display:grid; grid-template-columns:minmax(0,1.05fr) minmax(280px,.95fr); gap:16px; } .arc-grid, .mini-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:14px; }
+.callout { border-left:4px solid var(--accent); background:var(--card2); padding:14px 16px; border-radius:14px; } .callout.warn { border-left-color:var(--warn); } .callout.bad { border-left-color:var(--bad); }
+.round-card > header, .expert-card > header { display:flex; justify-content:space-between; gap:14px; align-items:flex-start; flex-wrap:wrap; margin-bottom:14px; } .round-badges { display:flex; gap:8px; flex-wrap:wrap; }
+details summary { cursor:pointer; font-weight:760; display:flex; justify-content:space-between; gap:12px; align-items:center; } details summary code { color:var(--muted); font-size:12px; font-weight:500; overflow-wrap:anywhere; }
+pre { white-space:pre-wrap; overflow:auto; background:color-mix(in srgb, var(--fg) 6%, transparent); padding:13px; border-radius:12px; border:1px solid var(--border); max-height:520px; } code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.93em; }
+ul, ol { padding-left:1.35rem; } li { margin:.3rem 0; } .muted { color:var(--muted); } .small { font-size:13px; color:var(--muted); }
+.table-wrap { overflow:auto; border:1px solid var(--border); border-radius:16px; } table { width:100%; border-collapse:collapse; min-width:820px; background:var(--card); } th, td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--border); vertical-align:top; } th { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.08em; background:var(--card2); }
+footer { margin-top:40px; color:var(--muted); border-top:1px solid var(--border); padding-top:18px; }
+@media (max-width: 860px) { .two-col { grid-template-columns:1fr; } .hero { padding:21px; border-radius:22px; } main { padding:18px 13px 50px; } }
+@media print { body { background:#fff; } .hero, .card, .round-card, details.artifact, .expert-card { box-shadow:none; } .report-nav, details.artifact pre { max-height:none; } }
 </style>
 </head>
 <body><main>
-<h1>Pi workshop report <span class="badge">${escapeHtml(args.result.status)}</span></h1>
-<p class="path">${escapeHtml(args.workshopDir)}</p>
-<div class="grid">
-  <div class="metric"><span>Status</span><b>${escapeHtml(args.result.status)}</b></div>
-  <div class="metric"><span>Converged</span><b class="${args.result.converged ? "ok" : "warn"}">${args.result.converged ? "yes" : "no"}</b></div>
-  <div class="metric"><span>Rounds</span><b>${args.result.roundsRun}</b></div>
-  <div class="metric"><span>Experts</span><b>${escapeHtml(String(args.result.experts.length))}</b></div>
-</div>
-<section class="card"><h2>Original goal / prompt</h2><pre>${escapeHtml(idea)}</pre></section>
-<section class="card"><h2>Workflow and delegation policy</h2><pre>${escapeHtml(workflow)}</pre></section>
-<section class="card"><h2>Final resolution</h2><pre>${escapeHtml(final)}</pre></section>
-<section class="card"><h2>User answers / rulings</h2><pre>${escapeHtml(answers)}</pre></section>
-<h2>Prototype and scratch evidence</h2>
-${scratchFiles.length ? await fileSection("scratch", scratchFiles) : `<p class="card">No scratch/prototype artifacts were recorded.</p>`}
-<h2>Panel work products</h2>
-${await fileSection("artifact", args.roundFiles)}
-<section class="card"><h2>Raw transcript</h2><p class="path">${escapeHtml(args.transcriptPath)}</p></section>
+<section class="hero" id="top">
+  <div class="hero-top"><div><p class="eyebrow">Pi workshop report</p><h1>${escapeHtml(status)} ${args.result.converged ? "resolution" : "workshop trace"}</h1><p class="summary">${escapeHtml(statusMeaning(status, args.result.converged))}</p></div><div>${renderBadge(status, tone)} ${renderBadge(args.result.converged ? "converged" : "not converged", args.result.converged ? "ok" : "warn")}</div></div>
+  <p class="path">${escapeHtml(args.workshopDir)}</p>
+  <div class="metric-grid">
+    ${renderMetric("Status", status, tone)}
+    ${renderMetric("Rounds", String(args.result.roundsRun), "neutral")}
+    ${renderMetric("Experts", String(args.result.experts.length), "neutral", args.result.experts.join(", "))}
+    ${renderMetric("Child-run issues", String(failingRuns.length), failingRuns.length ? "bad" : "ok")}
+  </div>
+  <nav class="report-nav"><a href="#executive-summary">Executive summary</a><a href="#intervention">Intervention</a><a href="#discussion-arc">Discussion arc</a><a href="#conclusions">Conclusions</a><a href="#evidence">Evidence ledger</a><a href="#artifacts">Artifacts</a></nav>
+</section>
+
+<section id="executive-summary">
+  <h2>Executive summary</h2>
+  <div class="two-col">
+    <article class="card emphasis"><h3>Direction of discussion</h3><p>${escapeHtml(direction)}</p><h3>Final conclusion</h3><p>${escapeHtml(conclusion || statusMeaning(status, args.result.converged))}</p></article>
+    <aside class="card"><h3>Human readability brief</h3><div class="callout ${interventions.length ? "warn" : ""}"><strong>Human intervention required:</strong> ${escapeHtml(interventionLabel)}</div><p><strong>What changed from the original idea:</strong> ${escapeHtml(changed)}</p><p><strong>Confidence / evidence quality:</strong> ${escapeHtml(confidence)}</p><p><strong>Next recommended action:</strong> ${escapeHtml(reportBrief.nextAction || defaultNextAction(status))}</p></aside>
+  </div>
+</section>
+
+<section id="intervention">
+  <h2>Intervention required</h2>
+  <div class="card ${interventions.length || status === "DEGRADED" ? "emphasis" : ""}">
+    <p class="muted">Items below are the places where a human decision, rerun, or repair is most likely to change the outcome.</p>
+    ${renderList(interventions, args.result.converged && status === "ACCEPT" ? "No blocking intervention was detected." : "No specific intervention items were extracted; review the conclusion before acting.")}
+  </div>
+</section>
+
+<section id="discussion-arc">
+  <h2>Discussion arc</h2>
+  <p class="muted">Round-by-round synthesis of where the panel agreed, what changed, and what remained unresolved.</p>
+  ${rounds.length ? rounds.map(renderRoundCard).join("\n") : `<section class="card"><p class="muted">No round artifacts were recorded.</p></section>`}
+</section>
+
+<section id="conclusions">
+  <h2>Conclusions and action plan</h2>
+  <div class="grid">
+    <article class="card"><h3>Strongest viable version</h3>${renderMarkdownLite(strongest)}</article>
+    <article class="card"><h3>Required idea revision</h3>${renderMarkdownLite(requiredRevision, "No required revision recorded.")}</article>
+    <article class="card"><h3>Action checklist</h3>${renderList(actionItems.length ? actionItems : [defaultNextAction(status)])}</article>
+  </div>
+  <article class="card"><h3>Final resolution artifact</h3>${renderMarkdownLite(final)}</article>
+</section>
+
+<section id="evidence">
+  <h2>Evidence ledger</h2>
+  <div class="grid">
+    <article class="card"><h3>User answers / rulings</h3>${renderMarkdownLite(answers, "No user answers were recorded.")}</article>
+    <article class="card"><h3>Workflow and delegation policy</h3>${renderMarkdownLite(workflow)}</article>
+    <article class="card"><h3>Original goal / prompt</h3>${renderMarkdownLite(idea)}</article>
+  </div>
+  <article class="card"><h3>Child-run trust ledger</h3>${renderChildRunLedger(childRuns)}</article>
+  <article class="card"><h3>Scratch / prototype evidence</h3>${scratchFiles.length ? (await Promise.all(scratchFiles.map(async (file) => renderArtifactDetails({ file, rel: path.relative(args.workshopDir, file), name: path.basename(file), kind: "other", content: await read(file) }, path.relative(scratchRoot, file))))).join("\n") : `<p class="muted">No scratch/prototype artifacts were recorded.</p>`}</article>
+</section>
+
+<section id="artifacts">
+  <h2>Raw artifact archive</h2>
+  <p class="muted">All report claims above are backed by these local workshop artifacts. Paths are relative to the workshop directory.</p>
+  ${artifacts.map((artifact) => renderArtifactDetails(artifact, `${artifact.kind}: ${artifact.round ? `round ${artifact.round} · ` : ""}${artifact.expert ? `${reportDisplayName(artifact.expert)} · ` : ""}${artifact.name}`)).join("\n")}
+</section>
+
+<footer>
+  <p>Resolution: <a href="${artifactHref(path.relative(args.workshopDir, args.finalPath))}">${escapeHtml(path.relative(args.workshopDir, args.finalPath))}</a> · Transcript: <a href="${artifactHref(path.relative(args.workshopDir, args.transcriptPath))}">${escapeHtml(path.relative(args.workshopDir, args.transcriptPath))}</a> · Manifest: <a href="${artifactHref(path.relative(args.workshopDir, args.result.manifestPath))}">${escapeHtml(path.relative(args.workshopDir, args.result.manifestPath))}</a></p>
+</footer>
 </main></body></html>`;
 	await writeFileQueued(reportPath, html);
 	return reportPath;
@@ -1965,6 +2358,8 @@ async function runWorkshop(
 			transcriptPath,
 			roundFiles: allRoundFiles,
 			result: resultBase,
+			childRuns,
+			errors,
 		});
 	}
 	await scanRunLocalFiles("workshop", "final", roundsRun);
