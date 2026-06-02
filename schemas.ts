@@ -64,7 +64,7 @@ export const WorkshopParams = Type.Object({
 	subagents: Type.Optional(
 		Type.Boolean({
 			description:
-				"Run controlled parent-orchestrated pi-subagents briefing passes (scout, and researcher when webResearch=true) for each expert before critique. Main experts still do not launch subagents unless expertSubagents is true or explicit expert tools include subagent. Default false.",
+				"Run controlled parent-orchestrated direct restricted briefing passes (scout, and researcher when webResearch=true) for each expert before critique. Main experts still do not launch subagents unless expertSubagents is true or explicit expert tools include subagent. Default false.",
 		}),
 	),
 	expertSubagents: Type.Optional(
@@ -104,7 +104,7 @@ export const PublicWorkshopParams = Type.Object({
 	interactive: Type.Optional(Type.Boolean({ description: "Ask the user to answer blocking open questions between rounds" })),
 	webResearch: Type.Optional(Type.Boolean({ description: "Allow web/doc/code-search tools for experts. Does not grant bash." })),
 	planExperts: Type.Optional(Type.Boolean({ description: "When experts are not provided, run a panel-designer pass to choose 2-4 expert roles. Default true." })),
-	subagents: Type.Optional(Type.Boolean({ description: "Run parent-orchestrated scout/researcher briefs. Does not grant experts direct subagent access." })),
+	subagents: Type.Optional(Type.Boolean({ description: "Run parent-orchestrated direct restricted scout/researcher briefs. Does not grant experts direct subagent access." })),
 	htmlReport: Type.Optional(Type.Boolean({ description: "Write a self-contained HTML report. Default false for assistant tool calls." })),
 });
 

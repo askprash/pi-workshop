@@ -64,7 +64,7 @@ const BUILTIN_CONFIG: Required<Pick<WorkshopConfig, "defaults" | "profiles" | "m
 		safe: {
 			webResearch: true,
 			localBash: false,
-			subagents: true,
+			subagents: false,
 			expertSubagents: false,
 			prototyping: false,
 			htmlReport: true,
@@ -150,6 +150,7 @@ export function validateWorkshopConfig(raw: unknown, filePath: string): Workshop
 	if (obj.profiles !== undefined) {
 		if (!obj.profiles || typeof obj.profiles !== "object" || Array.isArray(obj.profiles)) throw new Error(`${filePath}.profiles must be an object`);
 		for (const [name, profile] of Object.entries(obj.profiles as Record<string, unknown>)) {
+			if (name === "safe") throw new Error(`${filePath}.profiles.safe is immutable; choose another profile name instead of overriding the built-in safe profile`);
 			if (!/^[a-zA-Z0-9_.-]+$/.test(name)) throw new Error(`${filePath}.profiles has invalid profile name ${name}`);
 			profiles[name] = validateParamConfig(profile, `${filePath}.profiles.${name}`);
 		}

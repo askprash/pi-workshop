@@ -20,7 +20,7 @@
       "prototyping": true,
       "htmlReport": true
     },
-    "safe": {
+    "trusted-local": {
       "webResearch": true,
       "localBash": false,
       "subagents": true,

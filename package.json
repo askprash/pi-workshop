@@ -1,11 +1,10 @@
 {
   "name": "pi-workshop-extension",
-  "version": "0.2.1-safe-beta",
-  "description": "Safe-beta Pi workshop extension for recursive expert ideation with audit artifacts.",
+  "version": "0.2.2-beta",
+  "description": "Public-beta Pi workshop extension for recursive expert ideation with safe defaults and audit artifacts.",
   "keywords": ["pi-package", "pi-extension", "workshop", "agents"],
   "license": "MIT",
   "author": "Prashanth Prakash",
-  "//repository_TODO": "Update repository URL before publishing — no git remote was configured at the time this manifest was generated.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/prashanthprakash/pi-workshop-extension.git"
@@ -33,7 +32,6 @@
     "smoke": "pi -e ./index.ts --mode json --no-session -p \"/workshop-config --check\" >/tmp/pi-workshop-smoke.jsonl",
     "validate": "npm test && npm run smoke"
   },
-  "//peerDependencies_TODO": "Pin to real version ranges before publishing. Only @earendil-works/pi-tui was discoverable locally (0.74.2); others left as '*' until verified.",
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",

@@ -12,7 +12,7 @@ import { resolveWorkshopConfig, definedOnly, type ResolvedWorkshopConfig } from 
 import { safeSegment, expertArtifactSegment, assertUniqueExpertNamesForArtifacts, parsePlannedExperts, selectRequestedProfile } from "./logic.js";
 import { SCRATCH_POLICY_FILE, MANIFEST_FILE, writeFileQueued, listFilesRecursive, writeScratchPolicy, readScratchPolicy, revokeScratchPolicy, validateScratchNonce, ensureDirInsideNoSymlinks, writeScratchFileNoSymlink, writeRunManifest, type ScratchPolicy, type ScratchPolicyHandle } from "./artifacts.ts";
 
-const EXTENSION_VERSION = "0.2.1-safe-beta";
+const EXTENSION_VERSION = "0.2.2-beta";
 const WEB_RESEARCH_TOOLS = "web_search,fetch_content,get_search_content,code_search";
 const PROTOTYPE_TOOL = "workshop_scratch";
 const OUTPUT_CAP_BYTES = 80 * 1024;
@@ -305,52 +305,12 @@ async function observedFilesFromSubagentRun(run: ChildRun): Promise<ObservedFile
 	return entries;
 }
 
-async function snapshotDownloads(): Promise<Map<string, { bytes: number; mtimeMs: number }>> {
-	const dir = path.join(os.homedir(), "Downloads");
-	const out = new Map<string, { bytes: number; mtimeMs: number }>();
-	let entries: fssync.Dirent[] = [];
-	try { entries = await fs.readdir(dir, { withFileTypes: true }); }
-	catch { return out; }
-	for (const entry of entries) {
-		if (entry.name.startsWith(".")) continue;
-		const full = path.join(dir, entry.name);
-		const stat = await fs.stat(full).catch(() => undefined);
-		if (!stat) continue;
-		out.set(full, { bytes: stat.size, mtimeMs: stat.mtimeMs });
-	}
-	return out;
-}
-
-async function createDownloadAudit(onFiles?: (files: ObservedFile[]) => void): Promise<{ files: ObservedFile[]; scan: (owner?: string, phase?: string, round?: number) => Promise<ObservedFile[]> }> {
-	const baseline = await snapshotDownloads();
-	const seen = new Set(baseline.keys());
-	const files: ObservedFile[] = [];
+async function createRunLocalFileAudit(_onFiles?: (files: ObservedFile[]) => void): Promise<{ files: ObservedFile[]; scan: (owner?: string, phase?: string, round?: number) => Promise<ObservedFile[]> }> {
+	// Privacy first: do not scan home-directory locations.
+	// Observable files are added from explicit child-run output paths and workshop artifacts only.
 	return {
-		files,
-		scan: async (owner?: string, phase?: string, round?: number) => {
-			const current = await snapshotDownloads();
-			const fresh: ObservedFile[] = [];
-			for (const [filePath, stat] of current.entries()) {
-				if (seen.has(filePath)) continue;
-				seen.add(filePath);
-				fresh.push({
-					path: filePath,
-					name: path.basename(filePath),
-					source: "downloads",
-					bytes: stat.bytes,
-					mtimeMs: stat.mtimeMs,
-					detectedAt: new Date().toISOString(),
-					owner,
-					phase,
-					round,
-				});
-			}
-			if (fresh.length) {
-				files.push(...fresh);
-				onFiles?.(fresh);
-			}
-			return fresh;
-		},
+		files: [],
+		scan: async (_owner?: string, _phase?: string, _round?: number) => [],
 	};
 }
 
@@ -383,6 +343,9 @@ async function runPiJsonPrompt(options: {
 	prompt: string;
 	cwd: string;
 	tools?: string;
+	noExtensions?: boolean;
+	noSkills?: boolean;
+	noContextFiles?: boolean;
 	signal?: AbortSignal;
 	timeoutMs?: number;
 	phase?: string;
@@ -391,6 +354,9 @@ async function runPiJsonPrompt(options: {
 	onActivity?: (text: string) => void;
 }): Promise<ChildRun> {
 	const args = ["--mode", "json", "-p", "--no-session"];
+	if (options.noExtensions) args.push("--no-extensions");
+	if (options.noSkills) args.push("--no-skills");
+	if (options.noContextFiles) args.push("--no-context-files");
 	if (options.tools) args.push("--tools", options.tools);
 	args.push(options.prompt);
 	const started = Date.now();
@@ -492,6 +458,9 @@ async function runChildPi(options: {
 	cwd: string;
 	model?: string;
 	tools?: string;
+	noExtensions?: boolean;
+	noSkills?: boolean;
+	noContextFiles?: boolean;
 	signal?: AbortSignal;
 	timeoutMs?: number;
 	phase?: string;
@@ -507,7 +476,11 @@ async function runChildPi(options: {
 	await fs.writeFile(systemPath, options.systemPrompt, { encoding: "utf8", mode: 0o600 });
 
 	try {
-	const args = ["--mode", "json", "-p", "--no-session", "--tools", options.tools ?? DEFAULT_TOOLS];
+	const args = ["--mode", "json", "-p", "--no-session"];
+	if (options.noExtensions) args.push("--no-extensions");
+	if (options.noSkills) args.push("--no-skills");
+	if (options.noContextFiles) args.push("--no-context-files");
+	args.push("--tools", options.tools ?? DEFAULT_TOOLS);
 	if (options.model) args.push("--model", options.model);
 	args.push("--append-system-prompt", systemPath, options.userPrompt);
 
@@ -862,6 +835,28 @@ ${contextPaths.length ? contextPaths.map((p) => `- ${p}`).join("\n") : "- none"}
 Return JSON only.`;
 }
 
+function assistantBriefSystemPrompt(agent: "scout" | "researcher"): string {
+	const mode = agent === "researcher" ? "external evidence / web research" : "local codebase / context scouting";
+	return `# Pi workshop restricted ${agent} brief runner
+
+You are a junior ${mode} runner for pi-workshop. You are a direct child process, not a global pi-subagents /run agent. You must produce a concise evidence brief for a main expert.
+
+Rules:
+- Use only the tools explicitly granted to this child.
+- Do not call /run or launch subagents.
+- Do not edit, write, or mutate project files.
+- Cite files, paths, commands/tool evidence, or URLs for claims.
+- Gather facts and uncertainty; do not decide the workshop verdict.
+- If needed tools are unavailable, say what evidence is missing and continue with available evidence.`;
+}
+
+function assistantBriefTools(agent: "scout" | "researcher", webResearch: boolean): string {
+	return uniqueToolList([
+		...DEFAULT_TOOLS.split(","),
+		...(agent === "researcher" && webResearch ? WEB_RESEARCH_TOOLS.split(",") : []),
+	]);
+}
+
 async function runExpertAssistantBrief(args: {
 	expert: ExpertInput;
 	round: number;
@@ -876,6 +871,7 @@ async function runExpertAssistantBrief(args: {
 	childTimeoutMs?: number;
 	onUpdate?: (text: string) => void;
 	recordChildRun?: (run: ChildRun) => void;
+	onToolEvent?: (event: ToolAuditEvent) => void;
 	onPanelEvent?: (event: PanelEvent) => void;
 }): Promise<string> {
 	const safeName = expertArtifactSegment(args.expert);
@@ -904,25 +900,31 @@ async function runExpertAssistantBrief(args: {
 			continue;
 		}
 		const model = brief.model ?? args.juniorModel;
-		const agentSpec = model ? `${agent}[model=${model}]` : agent;
 		const task = `${brief.task}\n\nExpert receiving this brief: ${args.expert.name}\nExpert stance:\n${args.expert.stance}\n\nIdea file: ${args.ideaPath}\nWorking synthesis: ${args.workingPath}\nContext paths:\n${context}\n\nOutput a concise evidence brief. Do not decide the final verdict; the main expert owns judgment.`;
 		const subagentId = `${args.round}:${args.expert.name}:${i + 1}:${agent}`;
 		const startedAt = new Date().toISOString();
 		args.onPanelEvent?.({
 			type: "subagent_start",
-			subagent: { id: subagentId, name: `${args.expert.name}-${agent}-subagent`, expert: args.expert.name, agent, task: brief.task, round: args.round, phase: "assistant_brief", status: "running", startedAt, activity: ["queued"] },
+			subagent: { id: subagentId, name: `${args.expert.name}-${agent}-brief`, expert: args.expert.name, agent, task: brief.task, round: args.round, phase: "assistant_brief", status: "running", startedAt, activity: ["queued direct restricted runner"] },
 		});
-		const run = await runPiJsonPrompt({
-			name: `${args.expert.name}-${agent}-subagent`,
-			prompt: `/run ${agentSpec} ${shellQuoteForSlash(task)}`,
+		const run = await runChildPi({
+			name: `${args.expert.name}-${agent}-brief`,
+			systemPrompt: assistantBriefSystemPrompt(agent),
+			userPrompt: task,
 			cwd: args.baseCwd,
-			tools: "subagent",
+			model,
+			tools: assistantBriefTools(agent, args.webResearch),
+			noExtensions: agent === "scout",
+			noSkills: true,
+			noContextFiles: true,
 			signal: args.signal,
 			timeoutMs: args.childTimeoutMs,
 			phase: "assistant_brief",
 			round: args.round,
+			runDir: args.workshopDir,
 			onProgress: args.onUpdate,
 			onActivity: (text) => args.onPanelEvent?.({ type: "subagent_activity", id: subagentId, text }),
+			onToolEvent: args.onToolEvent,
 		});
 		const parsedPaths = parseSubagentOutputPaths(run.text);
 		args.onPanelEvent?.({
@@ -947,7 +949,7 @@ async function runExpertAssistantBrief(args: {
 			},
 		});
 		args.recordChildRun?.(run);
-		content += `\n\n## ${i + 1}. ${agent} subagent\n\nModel: ${model}\n\nTask:\n${brief.task}\n\nResult:\n${run.text}\n`;
+		content += `\n\n## ${i + 1}. ${agent} brief (direct restricted runner)\n\nModel: ${model}\nTools: ${assistantBriefTools(agent, args.webResearch)}\nIsolation: ${agent === "scout" ? "--no-extensions --no-skills --no-context-files" : "--no-skills --no-context-files; web/search tools come from the trusted Pi installation"}\n\nTask:\n${brief.task}\n\nResult:\n${run.text}\n`;
 	}
 	await writeFileQueued(out, content);
 	return out;
@@ -1089,13 +1091,51 @@ ${await fileSection("artifact", args.roundFiles)}
 
 async function askUserForQuestions(ctx: any, round: number, questions: string[], answersPath: string): Promise<boolean> {
 	if (!ctx.hasUI || questions.length === 0) return false;
-	const prefill = questions.map((q, i) => `Q${i + 1}: ${q}\nA${i + 1}: `).join("\n\n");
-	const answer = await ctx.ui.editor(
-		`Pi workshop round ${round}: answer blocking questions (optional)`,
-		`${prefill}\n\nLeave blank/close to skip. Your answers become authoritative.`,
-	);
-	if (!answer?.trim()) return false;
-	await writeFileQueued(answersPath, `${await fs.readFile(answersPath, "utf8").catch(() => "")}\n\n## Round ${round} user answers\n\n${answer.trim()}\n`);
+	const answers: string[] = [];
+	const answered = new Set<number>();
+	const labelsForQuestions = () => [
+		...questions.map((q, i) => `${answered.has(i) ? "✓" : "Q"}${i + 1}: ${q.slice(0, 90)}`),
+		"Other / additional comments",
+		answers.length ? "Done — save answers" : "Skip for now",
+	];
+	while (true) {
+		const labels = labelsForQuestions();
+		const choice = typeof ctx.ui.select === "function"
+			? await ctx.ui.select(`Pi workshop round ${round}: answer or clarify`, labels)
+			: undefined;
+		if (!choice) {
+			const prefill = questions.map((q, i) => `Q${i + 1}: ${q}\nA${i + 1}: `).join("\n\n");
+			const answer = await ctx.ui.editor(
+				`Pi workshop round ${round}: answer blocking questions (optional)`,
+				`${prefill}\n\nOther / additional comments:\n\nLeave blank/close to skip. Your answers become authoritative.`,
+			);
+			if (!answer?.trim()) return false;
+			answers.push(answer.trim());
+			break;
+		}
+		if (choice === "Skip for now" || choice === "Done — save answers") break;
+		const other = choice === "Other / additional comments";
+		const index = other ? -1 : Math.max(0, Number(choice.match(/^[Q✓](\d+):/)?.[1] ?? "1") - 1);
+		const prompt = other ? "Other / additional comments" : questions[index];
+		const existing = other ? "" : answers.find((entry) => entry.startsWith(`### Q${index + 1}:`))?.split("\n\n").slice(1).join("\n\n") ?? "";
+		const answer = await ctx.ui.editor(
+			other ? `Round ${round}: other comments` : `Round ${round}: Q${index + 1}`,
+			`${prompt}\n\n${existing || "Type your answer or clarification here."}`,
+		);
+		if (!answer?.trim()) continue;
+		if (other) {
+			answers.push(`### Other / additional comments\n\n${answer.trim()}`);
+		} else {
+			answered.add(index);
+			const heading = `### Q${index + 1}: ${questions[index]}`;
+			const replacement = `${heading}\n\n${answer.trim()}`;
+			const existingIndex = answers.findIndex((entry) => entry.startsWith(heading));
+			if (existingIndex >= 0) answers[existingIndex] = replacement;
+			else answers.push(replacement);
+		}
+	}
+	if (!answers.length) return false;
+	await writeFileQueued(answersPath, `${await fs.readFile(answersPath, "utf8").catch(() => "")}\n\n## Round ${round} user answers\n\n${answers.join("\n\n")}\n`);
 	return true;
 }
 
@@ -1124,8 +1164,8 @@ async function runWorkshop(
 	const childRuns: ChildRun[] = [];
 	const errors: string[] = [];
 	let degraded = false;
-	const downloadAudit = await createDownloadAudit((files) => onPanelEvent?.({ type: "download_detected", files }));
-	const scanDownloads = (owner?: string, phase?: string, round?: number) => downloadAudit.scan(owner, phase, round).catch(() => []);
+	const runLocalFileAudit = await createRunLocalFileAudit((files) => onPanelEvent?.({ type: "download_detected", files }));
+	const scanRunLocalFiles = (owner?: string, phase?: string, round?: number) => runLocalFileAudit.scan(owner, phase, round).catch(() => []);
 	const childTimeoutMs = resolvedConfig.limits.childTimeoutSeconds * 1000;
 	const runAbort = new AbortController();
 	const onExternalAbort = () => runAbort.abort();
@@ -1158,7 +1198,7 @@ async function runWorkshop(
 	const runSignal = runAbort.signal;
 	const recordChildRun = (run: ChildRun) => {
 		childRuns.push(run);
-		void scanDownloads(run.name, run.phase, run.round);
+		void scanRunLocalFiles(run.name, run.phase, run.round);
 		if (run.exitCode !== 0 || run.timedOut || run.aborted) {
 			degraded = true;
 			errors.push(`${run.phase ?? "child"}:${run.name} exited ${run.exitCode}${run.timedOut ? " (timeout)" : ""}${run.aborted ? " (aborted)" : ""}`);
@@ -1166,26 +1206,27 @@ async function runWorkshop(
 	};
 	const emitToolEvent = (event: ToolAuditEvent) => {
 		onPanelEvent?.({ type: "tool_event", event });
-		void scanDownloads(event.child, event.phase, event.round);
+		void scanRunLocalFiles(event.child, event.phase, event.round);
 	};
-	const inheritedModel = activeModelRef(ctx);
-	const inheritedProvider = activeProvider(ctx);
-	const strongModel = params.strongModel ?? inheritedModel;
-	if (!strongModel) {
-		throw new Error(
-			"pi-workshop: no strongModel available. Set models.strongModel in ~/.pi/agent/pi-workshop.config.json or pass --strong-model, or launch pi with a default model so the workshop can inherit it.",
-		);
-	}
-	const plannerModel = params.plannerModel ?? strongModel;
-	const expertModel = params.expertModel ?? strongModel;
-	const synthModel = params.synthModel ?? strongModel;
-	const juniorModel = params.juniorModel ?? (inheritedProvider ? providerQualifiedIfAvailable(ctx, inheritedProvider, strongModel) : undefined) ?? inheritedModel ?? strongModel;
+	const modelResolution = resolveWorkshopModels(ctx, params);
+	if (!modelResolution.strongModel) throw new Error(missingStrongModelGuidance());
+	const strongModel = modelResolution.strongModel;
+	const plannerModel = modelResolution.plannerModel ?? strongModel;
+	const expertModel = modelResolution.expertModel ?? strongModel;
+	const synthModel = modelResolution.synthModel ?? strongModel;
+	const juniorModel = modelResolution.juniorModel ?? strongModel;
 	const contextPaths = (params.contextPaths ?? []).map((p) => resolveMaybe(baseCwd, p));
 	const workshopDir = params.outputDir
 		? resolveMaybe(baseCwd, params.outputDir)
 		: path.join(baseCwd, ".pi", "workshops", `${timestampSlug()}-${slugify(params.idea)}`);
 	await fs.mkdir(workshopDir, { recursive: true });
+	const realBaseCwd = await fs.realpath(baseCwd);
 	const realWorkshopDir = await fs.realpath(workshopDir);
+	try {
+		assertInside(realBaseCwd, realWorkshopDir);
+	} catch {
+		throw new Error(`Workshop outputDir must resolve inside the current cwd for public/beta runs: ${workshopDir}`);
+	}
 	if (prototypingEnabled && !realWorkshopDir.includes(`${path.sep}.pi${path.sep}workshops${path.sep}`)) {
 		throw new Error("prototyping/workshop_scratch requires the workshop artifact directory to be under .pi/workshops");
 	}
@@ -1280,13 +1321,16 @@ async function runWorkshop(
 		`Web research tools: ${webResearchEnabled ? "enabled" : "disabled"}`,
 		`Local bash tools: ${localBashEnabled ? "enabled for main experts only" : "disabled"}`,
 		`Workshop mode (--workshop): ${workshop ? "enabled" : "disabled"}`,
-		`Parent-orchestrated assistant briefs (--subagents): ${parentBriefsEnabled ? "enabled" : "disabled"}`,
+		`Parent-orchestrated assistant briefs (--subagents): ${parentBriefsEnabled ? "enabled via direct restricted child runners" : "disabled"}`,
 		`Main expert direct subagent tool: ${mainExpertsCanUseSubagents ? "enabled" : "disabled"}`,
 		`Scratch/prototype tool (${PROTOTYPE_TOOL}): ${prototypingEnabled ? "enabled" : "disabled"}`,
 		`HTML report: ${htmlReportEnabled ? "enabled" : "disabled"}`,
 		parentBriefsEnabled
-			? "Before each expert critique, the parent runs scout/researcher briefs and passes brief files to experts."
+			? "Before each expert critique, the parent runs direct restricted scout/researcher child runners and passes brief files to experts. No global /run scout|researcher agents or subagent tool are used for safe/public briefs."
 			: "No parent-run junior briefs will be created unless --subagents/subagents=true is used.",
+		parentBriefsEnabled
+			? "Brief runner isolation: scout uses --no-extensions --no-skills --no-context-files with read/grep/find/ls only; researcher uses --no-skills --no-context-files plus read/grep/find/ls and configured web/search tools when web research is enabled."
+			: "Brief runner isolation: n/a.",
 		mainExpertsCanUseSubagents
 			? "If an expert calls subagent directly, dashboard activity will show 'MAIN EXPERT called subagent tool' when JSON tool events expose it."
 			: "In the default slash workflow, main experts cannot call subagents; use --expert-subagents/--workshop or explicit expert.tools='...,subagent' to allow that.",
@@ -1333,6 +1377,7 @@ async function runWorkshop(
 						childTimeoutMs,
 						onUpdate,
 						recordChildRun,
+						onToolEvent: emitToolEvent,
 						onPanelEvent,
 					});
 					assistantBriefs.set(expert.name, [briefPath]);
@@ -1551,7 +1596,7 @@ async function runWorkshop(
 			result: resultBase,
 		});
 	}
-	await scanDownloads("workshop", "final", roundsRun);
+	await scanRunLocalFiles("workshop", "final", roundsRun);
 	await revokeScratchPolicyForRun();
 	await writeRunManifest(workshopDir, {
 		extensionVersion: EXTENSION_VERSION,
@@ -1568,7 +1613,7 @@ async function runWorkshop(
 		models: { strongModel, plannerModel, expertModel, synthModel, juniorModel },
 		experts: experts.map((expert) => ({ name: expert.name, model: expert.model, tools: expert.tools })),
 		childRuns,
-		downloadedFiles: downloadAudit.files,
+		observedFiles: runLocalFileAudit.files,
 		errors,
 		scratchPolicy: scratchPolicyForManifest ? { path: SCRATCH_POLICY_FILE, status: scratchPolicyForManifest.status, allowedExperts: scratchPolicyForManifest.allowedExperts.map((expert) => expert.name), expiresAt: scratchPolicyForManifest.expiresAt, revokedAt: scratchPolicyForManifest.revokedAt ?? null, artifactContainedNotSandboxed: true } : undefined,
 		reportPath: reportPath ?? null,
@@ -1793,13 +1838,65 @@ function updateDashboardState(state: DashboardState, event: PanelEvent): void {
 }
 
 function padAnsi(text: string, width: number): string {
+	if (width <= 0) return "";
 	const truncated = truncateToWidth(text, width, "…");
 	return truncated + " ".repeat(Math.max(0, width - visibleWidth(truncated)));
 }
 
+function frameRule(
+	left: string,
+	right: string,
+	width: number,
+	theme: any,
+	options: { leftCorner?: string; rightCorner?: string; fill?: string; color?: "accent" | "success" | "warning" | "muted" | "border" | "borderAccent" | "borderMuted" } = {},
+): string {
+	if (width <= 0) return "";
+	const color = options.color ?? "borderAccent";
+	const border = (text: string) => theme.fg(color, text);
+	if (width === 1) return border(options.fill ?? "─");
+	const inner = Math.max(0, width - 2);
+	let leftText = truncateToWidth(left, inner, "");
+	let rightText = truncateToWidth(right, Math.max(0, inner - visibleWidth(leftText)), "");
+	while (visibleWidth(leftText) + visibleWidth(rightText) > inner && visibleWidth(rightText) > 0) {
+		rightText = truncateToWidth(rightText, visibleWidth(rightText) - 1, "");
+	}
+	while (visibleWidth(leftText) + visibleWidth(rightText) > inner && visibleWidth(leftText) > 0) {
+		leftText = truncateToWidth(leftText, visibleWidth(leftText) - 1, "");
+	}
+	const fill = options.fill ?? "─";
+	const fillWidth = Math.max(0, inner - visibleWidth(leftText) - visibleWidth(rightText));
+	return border(options.leftCorner ?? "├") + leftText + border(fill.repeat(fillWidth)) + rightText + border(options.rightCorner ?? "┤");
+}
+
+function frameContent(content: string, width: number, theme: any, color: "border" | "borderAccent" | "borderMuted" = "borderMuted"): string {
+	if (width <= 0) return "";
+	if (width === 1) return theme.fg(color, "│");
+	const inner = Math.max(0, width - 2);
+	return theme.fg(color, "│") + padAnsi(content, inner) + theme.fg(color, "│");
+}
+
+function framePanel(title: string, subtitle: string, body: string[], width: number, theme: any, maxBodyRows: number): string[] {
+	const top = frameRule(title, subtitle, width, theme, { leftCorner: "╭", rightCorner: "╮", color: "borderAccent" });
+	const bottom = frameRule("", "", width, theme, { leftCorner: "╰", rightCorner: "╯", color: "borderAccent" });
+	const rows = body.slice(0, Math.max(0, maxBodyRows)).map((line) => frameContent(line, width, theme));
+	return [top, ...rows, bottom];
+}
+
+function splitRule(width: number, leftWidth: number, rightWidth: number, theme: any): string {
+	if (width <= 0) return "";
+	if (width < 3) return frameRule("", "", width, theme, { color: "borderAccent" });
+	return theme.fg("borderAccent", "├" + "─".repeat(Math.max(0, leftWidth)) + "┬" + "─".repeat(Math.max(0, rightWidth)) + "┤");
+}
+
+function splitContent(left: string, right: string, leftWidth: number, rightWidth: number, theme: any): string {
+	return theme.fg("borderMuted", "│") + padAnsi(left, leftWidth) + theme.fg("borderAccent", "│") + padAnsi(right, rightWidth) + theme.fg("borderMuted", "│");
+}
+
 function boxLines(title: string, status: string, body: string[], width: number, theme: any, color: "accent" | "success" | "warning" | "muted"): string[] {
-	const inner = Math.max(10, width - 2);
-	const topLabel = ` ${title} `;
+	if (width <= 0) return [];
+	if (width === 1) return [theme.fg(color, "│")];
+	const inner = Math.max(0, width - 2);
+	const topLabel = truncateToWidth(` ${title} `, inner, "");
 	const top = theme.fg(color, "╭" + "─".repeat(Math.max(0, inner - visibleWidth(topLabel))) + topLabel + "╮");
 	const bottom = theme.fg(color, "╰" + "─".repeat(inner) + "╯");
 	const rows = [theme.fg(color, status), ...body].slice(0, 5);
@@ -1807,30 +1904,30 @@ function boxLines(title: string, status: string, body: string[], width: number, 
 	return [top, ...rows.map((row) => theme.fg(color, "│") + padAnsi(row, inner) + theme.fg(color, "│")), bottom];
 }
 
-function dashboardStatsLine(state: DashboardState, theme: any): string {
+function dashboardStatsParts(state: DashboardState): string[] {
 	const parentSubagents = state.subagents.filter((item) => item.phase === "assistant_brief").length;
 	const directSubagents = state.subagents.filter((item) => item.phase === "direct_tool").length;
 	const runningSubagents = state.subagents.filter((item) => item.status === "running").length;
-	const downloaded = state.downloads.filter((file) => file.source === "downloads").length;
-	const savedFiles = state.downloads.length - downloaded;
+	const savedFiles = state.downloads.length;
 	const toolEvents = state.toolEvents.length;
-	const parts = [
-		`${parentSubagents + directSubagents} subagent${parentSubagents + directSubagents === 1 ? "" : "s"}${runningSubagents ? ` (${runningSubagents} running)` : ""}`,
-		`${downloaded} downloaded file${downloaded === 1 ? "" : "s"}`,
+	return [
+		`${parentSubagents + directSubagents} brief/subagent${parentSubagents + directSubagents === 1 ? "" : "s"}${runningSubagents ? ` (${runningSubagents} running)` : ""}`,
 		`${savedFiles} saved/artifact file${savedFiles === 1 ? "" : "s"}`,
 		`${toolEvents} tool event${toolEvents === 1 ? "" : "s"}`,
 	];
-	return theme.fg("accent", "observatory") + theme.fg("muted", `  ${parts.join(" • ")}  •  /workshop-observatory or Ctrl+Alt+W to inspect`);
 }
 
-function renderDashboardLines(state: DashboardState, theme: any, width: number): string[] {
-	const w = Math.max(50, width);
-	const lines: string[] = [];
-	const phase = state.final
+function dashboardStatsLine(state: DashboardState, theme: any): string {
+	return theme.fg("accent", "observatory") + theme.fg("muted", `  ${dashboardStatsParts(state).join(" • ")}  •  /workshop-observatory or Ctrl+Alt+W to inspect`);
+}
+
+function dashboardPhaseText(state: DashboardState): string {
+	return state.final
 		? `${state.final.status} (${state.final.converged ? "converged" : "not converged"})`
 		: `${state.phase} • round ${state.round || "?"}/${state.rounds || "?"}`;
-	lines.push(truncateToWidth(theme.fg("accent", theme.bold("workshop observatory")) + theme.fg("muted", `  ${phase}`), w));
+}
 
+function dashboardFlowLine(state: DashboardState, theme: any, width: number): string {
 	const flow = [
 		["plan", state.phase.includes("planning") || state.phase.includes("planned")],
 		["briefs", state.phase.includes("brief")],
@@ -1839,22 +1936,30 @@ function renderDashboardLines(state: DashboardState, theme: any, width: number):
 		["questions", state.phase.includes("question") || state.phase.includes("awaiting")],
 		["final", Boolean(state.final)],
 	] as const;
-	lines.push(
-		truncateToWidth(
-			flow
-				.map(([label, active]) => (active ? theme.fg("accent", `[${label}]`) : theme.fg("dim", `[${label}]`)))
-				.join(theme.fg("borderMuted", " ─▶ ")),
-			w,
-		),
+	return truncateToWidth(
+		flow
+			.map(([label, active]) => (active ? theme.fg("accent", `[${label}]`) : theme.fg("dim", `[${label}]`)))
+			.join(theme.fg("borderMuted", " ─▶ ")),
+		width,
 	);
+}
+
+function renderDashboardLines(state: DashboardState, theme: any, width: number): string[] {
+	if (width <= 0) return [];
+	const w = width;
+	const innerW = Math.max(0, w - 2);
+	const lines: string[] = [];
+	const phase = dashboardPhaseText(state);
+	lines.push(truncateToWidth(theme.fg("accent", "live workshop control room") + theme.fg("muted", "  /workshop-observatory or Ctrl+Alt+W opens full-screen mode"), innerW));
+	lines.push(dashboardFlowLine(state, theme, innerW));
 	if (state.delegation.length) {
-		lines.push(truncateToWidth(theme.fg("muted", `subagents: ${state.delegation.join(" • ")}`), w));
+		lines.push(truncateToWidth(theme.fg("muted", `subagents: ${state.delegation.join(" • ")}`), innerW));
 	}
 
 	const lanes = Array.from(state.lanes.values());
-	const cols = w >= 110 ? 2 : 1;
+	const cols = innerW >= 108 ? 2 : 1;
 	const gap = cols === 2 ? 2 : 0;
-	const colW = cols === 2 ? Math.floor((w - gap) / 2) : w;
+	const colW = cols === 2 ? Math.floor((innerW - gap) / 2) : innerW;
 	for (let i = 0; i < lanes.length; i += cols) {
 		const group = lanes.slice(i, i + cols);
 		const boxes = group.map((lane) => {
@@ -1864,10 +1969,10 @@ function renderDashboardLines(state: DashboardState, theme: any, width: number):
 			return boxLines(lane.name, `${icon} ${lane.status}`, activity.map((a) => theme.fg("dim", a)), colW, theme, color);
 		});
 		if (boxes.length === 1) {
-			lines.push(...boxes[0].map((line) => truncateToWidth(line, w)));
+			lines.push(...boxes[0].map((line) => truncateToWidth(line, innerW)));
 		} else {
 			for (let row = 0; row < boxes[0].length; row++) {
-				lines.push(truncateToWidth(padAnsi(boxes[0][row], colW) + " ".repeat(gap) + padAnsi(boxes[1][row], colW), w));
+				lines.push(truncateToWidth(padAnsi(boxes[0][row], colW) + " ".repeat(gap) + padAnsi(boxes[1][row], colW), innerW));
 			}
 		}
 	}
@@ -1875,17 +1980,17 @@ function renderDashboardLines(state: DashboardState, theme: any, width: number):
 	if (state.synthesis && (state.synthesis.activity.length || state.synthesis.status)) {
 		const synthIcon = state.synthesis.converged ? "✓" : "◆";
 		const synthText = state.synthesis.activity[state.synthesis.activity.length - 1] ?? "pending";
-		lines.push(...boxLines("synthesis", `${synthIcon} ${state.synthesis.status ?? "running"}`, [theme.fg("dim", synthText)], w, theme, state.synthesis.converged ? "success" : "warning"));
+		lines.push(...boxLines("synthesis", `${synthIcon} ${state.synthesis.status ?? "running"}`, [theme.fg("dim", synthText)], innerW, theme, state.synthesis.converged ? "success" : "warning"));
 	}
 	if (state.questions.length) {
-		const qLines = [`${state.questions.length} user question(s) — answer popup can steer next round`, ...state.questions.slice(0, 3).map((q) => `Q: ${q}`)];
-		lines.push(...boxLines("user steering", "? waiting", qLines.map((q) => theme.fg("dim", q)), w, theme, "warning"));
+		const qLines = [`${state.questions.length} user question(s) — per-question Q&A can steer next round`, ...state.questions.slice(0, 3).map((q) => `Q: ${q}`)];
+		lines.push(...boxLines("user steering", "? waiting", qLines.map((q) => theme.fg("dim", q)), innerW, theme, "warning"));
 	}
 	if (state.final) {
-		lines.push(...boxLines("resolution", state.final.status, [theme.fg("dim", state.final.reportPath ?? state.final.resolutionPath)], w, theme, state.final.converged ? "success" : "warning"));
+		lines.push(...boxLines("resolution", state.final.status, [theme.fg("dim", state.final.reportPath ?? state.final.resolutionPath)], innerW, theme, state.final.converged ? "success" : "warning"));
 	}
-	lines.push(truncateToWidth(dashboardStatsLine(state, theme), w));
-	return lines.slice(0, 30);
+	lines.push(truncateToWidth(dashboardStatsLine(state, theme), innerW));
+	return framePanel(theme.fg("accent", ` ✦ ${theme.bold("Observatory")} `), theme.fg("muted", ` ${phase} `), lines, w, theme, 28);
 }
 
 function installDashboardWidget(ctx: any, state: DashboardState): void {
@@ -1906,7 +2011,7 @@ function formatBytes(bytes?: number): string {
 	return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-type ObservatoryItem = { label: string; description: string; detail: () => string };
+type ObservatoryItem = { label: string; description: string; detail: (options?: { showActivity?: boolean }) => string };
 
 function observatoryItems(state: DashboardState): ObservatoryItem[] {
 	const items: ObservatoryItem[] = [];
@@ -1914,29 +2019,29 @@ function observatoryItems(state: DashboardState): ObservatoryItem[] {
 		items.push({
 			label: `expert: ${lane.name}`,
 			description: `${lane.status}${lane.path ? ` • ${path.basename(lane.path)}` : ""}`,
-			detail: () => [
+			detail: (options) => [
 				`# Expert lane: ${lane.name}`,
 				`Status: ${lane.status}`,
 				lane.path ? `Artifact: ${lane.path}` : "Artifact: not written yet",
-				"",
-				"## Recent activity",
-				...(lane.activity.length ? lane.activity.map((a) => `- ${a}`) : ["- none yet"]),
+				options?.showActivity === false ? undefined : "",
+				options?.showActivity === false ? undefined : "## Recent activity / thinking",
+				...(options?.showActivity === false ? [] : (lane.activity.length ? lane.activity.map((a) => `- ${a}`) : ["- none yet"])),
 				"",
 				lane.text ? `## Critique preview\n\n${lane.text.slice(0, 6000)}` : "Critique preview not available yet.",
-			].join("\n"),
+			].filter((line): line is string => line !== undefined).join("\n"),
 		});
 	}
 	if (state.synthesis?.path || state.synthesis?.activity.length) {
 		items.push({
 			label: "synthesis",
 			description: `${state.synthesis.status ?? "running"}${state.synthesis.path ? ` • ${path.basename(state.synthesis.path)}` : ""}`,
-			detail: () => [
+			detail: (options) => [
 				"# Synthesis",
 				`Status: ${state.synthesis?.status ?? "running"}`,
 				`Converged: ${state.synthesis?.converged ? "yes" : "no"}`,
 				state.synthesis?.path ? `Artifact: ${state.synthesis.path}` : "Artifact: not written yet",
 				"",
-				state.synthesis?.text ? state.synthesis.text.slice(0, 6000) : (state.synthesis?.activity ?? []).join("\n"),
+				state.synthesis?.text ? state.synthesis.text.slice(0, 6000) : (options?.showActivity === false ? "Activity hidden (press t to toggle)." : (state.synthesis?.activity ?? []).join("\n")),
 			].join("\n"),
 		});
 	}
@@ -1944,8 +2049,8 @@ function observatoryItems(state: DashboardState): ObservatoryItem[] {
 		items.push({
 			label: `subagent: ${sub.name}`,
 			description: `${sub.status} • ${sub.phase}${sub.expert ? ` • ${sub.expert}` : ""}`,
-			detail: () => [
-				`# Subagent thread: ${sub.name}`,
+			detail: (options) => [
+				`# Brief/subagent thread: ${sub.name}`,
 				`Status: ${sub.status}`,
 				`Phase: ${sub.phase}`,
 				sub.expert ? `Expert: ${sub.expert}` : undefined,
@@ -1957,7 +2062,7 @@ function observatoryItems(state: DashboardState): ObservatoryItem[] {
 				sub.exitCode !== undefined ? `Exit code: ${sub.exitCode}` : undefined,
 				"",
 				sub.task ? `## Task\n${sub.task}` : undefined,
-				sub.activity?.length ? `## Live/recent activity\n${sub.activity.map((a) => `- ${a}`).join("\n")}` : undefined,
+				options?.showActivity === false ? `## Live/recent activity\n(hidden — press t to toggle)` : (sub.activity?.length ? `## Live/recent activity / thinking\n${sub.activity.map((a) => `- ${a}`).join("\n")}` : undefined),
 				sub.outputPreview ? `## Output preview\n${sub.outputPreview}` : undefined,
 				sub.sessionExports?.length ? `## Session exports\n${sub.sessionExports.map((p) => `- ${p}`).join("\n")}` : undefined,
 				sub.savedOutputs?.length ? `## Saved outputs\n${sub.savedOutputs.map((p) => `- ${p}`).join("\n")}` : undefined,
@@ -1967,7 +2072,7 @@ function observatoryItems(state: DashboardState): ObservatoryItem[] {
 	}
 	for (const file of state.downloads.slice().reverse()) {
 		items.push({
-			label: `${file.source === "downloads" ? "download" : "file"}: ${file.name}`,
+			label: `file: ${file.name}`,
 			description: `${file.source} • ${formatBytes(file.bytes)}${file.owner ? ` • ${file.owner}` : ""}`,
 			detail: () => [
 				`# File: ${file.name}`,
@@ -1976,7 +2081,7 @@ function observatoryItems(state: DashboardState): ObservatoryItem[] {
 				`Size: ${formatBytes(file.bytes)}`,
 				file.mtimeMs ? `Modified: ${new Date(file.mtimeMs).toISOString()}` : undefined,
 				`Detected: ${file.detectedAt}`,
-				file.owner ? `Owner/child: ${file.owner}` : undefined,
+				file.owner ? `Observed after child: ${file.owner}` : undefined,
 				file.phase ? `Phase: ${file.phase}` : undefined,
 				file.round ? `Round: ${file.round}` : undefined,
 			].filter(Boolean).join("\n"),
@@ -2017,6 +2122,131 @@ function observatoryItems(state: DashboardState): ObservatoryItem[] {
 	return items;
 }
 
+type ObservatoryFocus = "list" | "detail";
+type ObservatoryRenderState = { selected: number; listScroll: number; detailScroll: number; focus: ObservatoryFocus; showActivity: boolean };
+
+function clampIndex(index: number, total: number): number {
+	if (total <= 0) return 0;
+	return Math.max(0, Math.min(total - 1, index));
+}
+
+function clampScroll(scroll: number, total: number, visibleRows: number): number {
+	return Math.max(0, Math.min(scroll, Math.max(0, total - Math.max(1, visibleRows))));
+}
+
+function scrollIntoView(selected: number, scroll: number, visibleRows: number, total: number): number {
+	if (visibleRows <= 0 || total <= 0) return 0;
+	let next = clampScroll(scroll, total, visibleRows);
+	if (selected < next) next = selected;
+	else if (selected >= next + visibleRows) next = selected - visibleRows + 1;
+	return clampScroll(next, total, visibleRows);
+}
+
+function observatoryItemTone(item: ObservatoryItem): "accent" | "success" | "warning" | "muted" {
+	const text = `${item.label} ${item.description}`.toLowerCase();
+	if (/running|waiting|queued/.test(text)) return "warning";
+	if (/done|complete|converged|final/.test(text)) return "success";
+	if (item.label.startsWith("file:") || item.label.startsWith("tool:")) return "accent";
+	return "muted";
+}
+
+function observatoryItemIcon(item: ObservatoryItem): string {
+	const text = `${item.label} ${item.description}`.toLowerCase();
+	if (/running|waiting/.test(text)) return "●";
+	if (/done|complete|converged|final/.test(text)) return "✓";
+	if (item.label.startsWith("file:")) return "◆";
+	if (item.label.startsWith("tool:")) return "◦";
+	return "○";
+}
+
+function observatoryListRows(items: ObservatoryItem[], controls: ObservatoryRenderState, height: number, width: number, theme: any): string[] {
+	if (height <= 0) return [];
+	if (!items.length) return [theme.fg("muted", "No observable expert/subagent/file/tool events yet.")];
+	controls.selected = clampIndex(controls.selected, items.length);
+	controls.listScroll = scrollIntoView(controls.selected, controls.listScroll, height, items.length);
+	const rows: string[] = [];
+	const end = Math.min(items.length, controls.listScroll + height);
+	for (let i = controls.listScroll; i < end; i++) {
+		const item = items[i]!;
+		const selected = i === controls.selected;
+		const tone = observatoryItemTone(item);
+		const prefix = selected ? "›" : " ";
+		const index = String(i + 1).padStart(2, " ");
+		const label = `${prefix} ${index} ${observatoryItemIcon(item)} ${item.label}`;
+		const row = truncateToWidth(theme.fg(selected ? "accent" : tone, label) + theme.fg("dim", ` — ${item.description}`), width, "…");
+		rows.push(selected ? theme.bg("selectedBg", padAnsi(row, width)) : row);
+	}
+	return rows;
+}
+
+function observatoryDetailRows(item: ObservatoryItem | undefined, controls: ObservatoryRenderState, height: number, width: number, theme: any): string[] {
+	if (height <= 0) return [];
+	const body = item?.detail({ showActivity: controls.showActivity }) ?? "# Observatory\n\nNo item selected yet.";
+	const wrapped = body.split("\n").flatMap((line) => wrapTextWithAnsi(line || " ", Math.max(8, width)));
+	const viewport = Math.max(0, height - 1);
+	controls.detailScroll = clampScroll(controls.detailScroll, wrapped.length, viewport);
+	const visible = viewport > 0 ? wrapped.slice(controls.detailScroll, controls.detailScroll + viewport) : [];
+	const footer = theme.fg("dim", `${Math.min(controls.detailScroll + visible.length, wrapped.length)}/${wrapped.length} lines${controls.showActivity ? "" : " • activity hidden"}`);
+	return [...visible.map((line) => truncateToWidth(line, width, "…")), footer];
+}
+
+function renderObservatoryMode(dashboard: DashboardState, controls: ObservatoryRenderState, theme: any, width: number, height: number): string[] {
+	if (width <= 0 || height <= 0) return [];
+	const w = width;
+	const h = Math.max(1, height);
+	const inner = Math.max(0, w - 2);
+	const items = observatoryItems(dashboard);
+	controls.selected = clampIndex(controls.selected, items.length);
+	const lines: string[] = [];
+	const phase = dashboardPhaseText(dashboard);
+	const title = theme.fg("accent", ` ✦ ${theme.bold("Observatory")} `) + theme.fg("muted", "workshop control room ");
+	lines.push(frameRule(title, theme.fg("muted", ` ${phase} `), w, theme, { leftCorner: "╭", rightCorner: "╮", color: "borderAccent" }));
+	lines.push(frameContent(theme.fg("accent", "live ") + theme.fg("muted", dashboardStatsParts(dashboard).join(" • ")), w, theme));
+	lines.push(frameContent(theme.fg("accent", `focus: ${controls.focus}`) + theme.fg("muted", "  ↑↓ select/scroll • Enter/→ detail • ←/Backspace list • PgUp/PgDn • t activity • Esc close"), w, theme));
+	lines.push(frameContent(dashboardFlowLine(dashboard, theme, inner), w, theme));
+
+	const twoPane = w >= 96;
+	if (twoPane) {
+		const leftW = Math.min(48, Math.max(30, Math.floor((inner - 1) * 0.34)));
+		const rightW = Math.max(0, inner - leftW - 1);
+		lines.push(splitRule(w, leftW, rightW, theme));
+		const selectedItem = items[controls.selected];
+		lines.push(splitContent(
+			theme.fg(controls.focus === "list" ? "accent" : "muted", `${controls.focus === "list" ? "▸ " : "  "}INDEX`) + theme.fg("dim", ` ${items.length} items`),
+			theme.fg(controls.focus === "detail" ? "accent" : "muted", `${controls.focus === "detail" ? "▸ " : "  "}DETAIL`) + theme.fg("dim", selectedItem ? ` ${selectedItem.label}` : " no selection"),
+			leftW,
+			rightW,
+			theme,
+		));
+		const bodyRows = Math.max(0, h - lines.length - 1);
+		const listRows = observatoryListRows(items, controls, bodyRows, leftW, theme);
+		const detailRows = observatoryDetailRows(selectedItem, controls, bodyRows, rightW, theme);
+		for (let row = 0; row < bodyRows; row++) {
+			lines.push(splitContent(listRows[row] ?? "", detailRows[row] ?? "", leftW, rightW, theme));
+		}
+	} else {
+		const selectedItem = items[controls.selected];
+		lines.push(frameRule(theme.fg("accent", ` ${controls.focus === "list" ? "INDEX" : "DETAIL"} `), selectedItem ? theme.fg("dim", ` ${selectedItem.label} `) : "", w, theme, { color: "borderAccent" }));
+		const bodyRows = Math.max(0, h - lines.length - 1);
+		const body = controls.focus === "list"
+			? observatoryListRows(items, controls, bodyRows, inner, theme)
+			: observatoryDetailRows(selectedItem, controls, bodyRows, inner, theme);
+		for (let row = 0; row < bodyRows; row++) lines.push(frameContent(body[row] ?? "", w, theme));
+	}
+
+	const bottom = frameRule(
+		theme.fg("muted", ` ${items.length} observable item${items.length === 1 ? "" : "s"} `),
+		theme.fg("dim", ` activity ${controls.showActivity ? "shown" : "hidden"} `),
+		w,
+		theme,
+		{ leftCorner: "╰", rightCorner: "╯", color: "borderAccent" },
+	);
+	if (lines.length >= h) return [...lines.slice(0, h - 1), bottom].map((line) => truncateToWidth(line, w, ""));
+	while (lines.length < h - 1) lines.push(frameContent("", w, theme));
+	lines.push(bottom);
+	return lines.map((line) => truncateToWidth(line, w, ""));
+}
+
 function launchWorkshopObservatory(ctx: any, state: DashboardState, setRefresh: (requestRender?: () => void) => void): void {
 	void openWorkshopObservatory(ctx, state, setRefresh).catch((error) => {
 		ctx.ui.notify(`Workshop observatory failed: ${String((error as Error)?.message ?? error)}`, "error");
@@ -2034,59 +2264,40 @@ async function openWorkshopObservatory(ctx: any, state?: DashboardState, onRefre
 	}
 	try {
 		await ctx.ui.custom((tui: any, theme: any, _keybindings: any, done: () => void) => {
-		onRefresh?.(() => tui.requestRender());
-		let selected = 0;
-		let detail = false;
-		let scroll = 0;
-		const renderList = (width: number): string[] => {
-			const items = observatoryItems(state);
-			if (selected >= items.length) selected = Math.max(0, items.length - 1);
-			const header = theme.fg("accent", theme.bold("workshop observatory navigator")) + theme.fg("muted", `  ${dashboardStatsLine(state, theme).replace(/\x1b\[[0-9;]*m/g, "")}`);
-			const lines = [truncateToWidth(header, width), truncateToWidth(theme.fg("dim", "↑↓ select • enter details • esc close"), width)];
-			if (!items.length) return [...lines, theme.fg("muted", "No observable expert/subagent/file events yet.")];
-			const windowSize = 18;
-			const start = Math.max(0, Math.min(selected - Math.floor(windowSize / 2), items.length - windowSize));
-			for (let i = start; i < Math.min(items.length, start + windowSize); i++) {
-				const item = items[i];
-				const prefix = i === selected ? theme.fg("accent", "› ") : "  ";
-				const text = `${item.label} — ${item.description}`;
-				lines.push(truncateToWidth(prefix + (i === selected ? theme.fg("accent", text) : text), width));
-			}
-			return lines;
-		};
-		const renderDetail = (width: number): string[] => {
-			const items = observatoryItems(state);
-			const item = items[selected];
-			if (!item) return renderList(width);
-			const body = item.detail();
-			const wrapped = body.split("\n").flatMap((line) => wrapTextWithAnsi(line || " ", Math.max(20, width - 2)));
-			const visible = wrapped.slice(scroll, scroll + 24);
-			return [
-				truncateToWidth(theme.fg("accent", theme.bold(item.label)) + theme.fg("muted", "  ↑↓ scroll • ←/backspace list • esc close"), width),
-				...visible.map((line) => truncateToWidth(line, width)),
-				truncateToWidth(theme.fg("dim", `${Math.min(scroll + visible.length, wrapped.length)}/${wrapped.length} lines`), width),
-			];
-		};
-		return {
-			render: (width: number) => detail ? renderDetail(width) : renderList(width),
-			invalidate: () => {},
-			handleInput: (data: string) => {
-				const items = observatoryItems(state);
-				if (matchesKey(data, Key.escape)) { done(); return; }
-				if (detail) {
-					if (matchesKey(data, Key.left) || matchesKey(data, Key.backspace)) { detail = false; scroll = 0; tui.requestRender(); return; }
-					if (matchesKey(data, Key.up)) scroll = Math.max(0, scroll - 1);
-					else if (matchesKey(data, Key.down)) scroll += 1;
+			onRefresh?.(() => tui.requestRender());
+			const controls: ObservatoryRenderState = { selected: 0, listScroll: 0, detailScroll: 0, focus: "list", showActivity: true };
+			const pageSize = () => Math.max(4, Math.floor((Number(tui?.terminal?.rows ?? 28) - 8) / 2));
+			return {
+				render: (width: number) => renderObservatoryMode(state, controls, theme, width, Number(tui?.terminal?.rows ?? 28)),
+				invalidate: () => {},
+				handleInput: (data: string) => {
+					const items = observatoryItems(state);
+					controls.selected = clampIndex(controls.selected, items.length);
+					if (matchesKey(data, Key.escape)) { done(); return; }
+					if (data === "t" || data === "T") { controls.showActivity = !controls.showActivity; tui.requestRender(); return; }
+					if (matchesKey(data, Key.tab)) { controls.focus = controls.focus === "list" ? "detail" : "list"; tui.requestRender(); return; }
+					if (matchesKey(data, Key.right) || matchesKey(data, Key.enter)) { controls.focus = "detail"; tui.requestRender(); return; }
+					if (matchesKey(data, Key.left) || matchesKey(data, Key.backspace)) { controls.focus = "list"; controls.detailScroll = 0; tui.requestRender(); return; }
+					if (controls.focus === "detail") {
+						if (matchesKey(data, Key.up)) controls.detailScroll = Math.max(0, controls.detailScroll - 1);
+						else if (matchesKey(data, Key.down)) controls.detailScroll += 1;
+						else if (matchesKey(data, Key.pageUp)) controls.detailScroll = Math.max(0, controls.detailScroll - pageSize());
+						else if (matchesKey(data, Key.pageDown)) controls.detailScroll += pageSize();
+						else if (matchesKey(data, Key.home)) controls.detailScroll = 0;
+						else if (matchesKey(data, Key.end)) controls.detailScroll += 10_000;
+						tui.requestRender();
+						return;
+					}
+					if (matchesKey(data, Key.up)) { controls.selected = Math.max(0, controls.selected - 1); controls.detailScroll = 0; }
+					else if (matchesKey(data, Key.down)) { controls.selected = Math.min(Math.max(0, items.length - 1), controls.selected + 1); controls.detailScroll = 0; }
+					else if (matchesKey(data, Key.pageUp)) { controls.selected = Math.max(0, controls.selected - pageSize()); controls.detailScroll = 0; }
+					else if (matchesKey(data, Key.pageDown)) { controls.selected = Math.min(Math.max(0, items.length - 1), controls.selected + pageSize()); controls.detailScroll = 0; }
+					else if (matchesKey(data, Key.home)) { controls.selected = 0; controls.detailScroll = 0; }
+					else if (matchesKey(data, Key.end)) { controls.selected = Math.max(0, items.length - 1); controls.detailScroll = 0; }
 					tui.requestRender();
-					return;
-				}
-				if (matchesKey(data, Key.up)) selected = Math.max(0, selected - 1);
-				else if (matchesKey(data, Key.down)) selected = Math.min(Math.max(0, items.length - 1), selected + 1);
-				else if (matchesKey(data, Key.enter) && items.length) { detail = true; scroll = 0; }
-				tui.requestRender();
-			},
-		};
-		}, { overlay: true, overlayOptions: { width: "90%", maxHeight: "85%", anchor: "center", margin: 1 } });
+				},
+			};
+		}, { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", row: 0, col: 0, margin: 0 } });
 	} finally {
 		onRefresh?.(undefined);
 	}
@@ -2273,6 +2484,71 @@ function modelExists(ctx: any, ref: string | undefined): boolean {
 	try { return Boolean(ctx?.modelRegistry?.find?.(provider, id)); } catch (error) { logWarn(`modelExists(${ref})`, error); return false; }
 }
 
+type WorkshopModelResolution = {
+	inheritedModel?: string;
+	strongModel?: string;
+	plannerModel?: string;
+	expertModel?: string;
+	synthModel?: string;
+	juniorModel?: string;
+	unknownModels: string[];
+};
+
+function missingStrongModelGuidance(): string {
+	return [
+		"pi-workshop: no strongModel available.",
+		"Set models.strongModel in ~/.pi/agent/pi-workshop.config.json, pass --strong-model, or launch pi with a default model so the workshop can inherit it.",
+		"",
+		"List model IDs:",
+		"  pi --list-models",
+		"",
+		"Minimal config:",
+		"```json",
+		"{",
+		"  \"models\": {",
+		"    \"strongModel\": \"provider/your-strong-model-id\",",
+		"    \"juniorModel\": \"provider/your-cheap-model-id\"",
+		"  }",
+		"}",
+		"```",
+	].join("\n");
+}
+
+function resolveWorkshopModels(ctx: any, params: WorkshopInput): WorkshopModelResolution {
+	const inheritedModel = activeModelRef(ctx);
+	const inheritedProvider = activeProvider(ctx);
+	const strongModel = params.strongModel ?? inheritedModel;
+	const plannerModel = params.plannerModel ?? strongModel;
+	const expertModel = params.expertModel ?? strongModel;
+	const synthModel = params.synthModel ?? strongModel;
+	const juniorModel = params.juniorModel ?? (strongModel && inheritedProvider ? providerQualifiedIfAvailable(ctx, inheritedProvider, strongModel) : undefined) ?? inheritedModel ?? strongModel;
+	const unknownModels = [...new Set([strongModel, plannerModel, expertModel, synthModel, juniorModel].filter((model): model is string => Boolean(model)).filter((model) => !modelExists(ctx, model)))];
+	return { inheritedModel, strongModel, plannerModel, expertModel, synthModel, juniorModel, unknownModels };
+}
+
+function modelResolutionLines(models: WorkshopModelResolution): string[] {
+	return [
+		`Inherited active model: ${models.inheritedModel ?? "none"}`,
+		`strongModel: ${models.strongModel ?? "MISSING"}`,
+		`plannerModel: ${models.plannerModel ?? "MISSING"}`,
+		`expertModel: ${models.expertModel ?? "MISSING"}`,
+		`synthModel: ${models.synthModel ?? "MISSING"}`,
+		`juniorModel: ${models.juniorModel ?? "MISSING"}`,
+	];
+}
+
+async function confirmUnknownConfiguredModels(ctx: any, params: WorkshopInput, commandName = "/workshop"): Promise<string | undefined> {
+	const models = resolveWorkshopModels(ctx, params);
+	if (!models.unknownModels.length) return undefined;
+	const message = [
+		`${commandName} references provider-qualified model ID(s) not found in the current model registry: ${models.unknownModels.join(", ")}.`,
+		"This may fail after the run starts. Use pi --list-models to choose available IDs, or confirm that these IDs are intentionally provided by a custom provider.",
+	].join("\n");
+	if (!ctx.hasUI) return `${message}\n\nNon-interactive runs fail closed for unknown provider-qualified models.`;
+	const ok = await ctx.ui.confirm("Confirm unknown workshop model", `${message}\n\nProceed anyway for this run?`);
+	return ok ? undefined : `${message}\n\nUser declined unknown model ID(s).`;
+}
+
 const PROJECT_PRIVILEGED_FLAGS = ["localBash", "expertSubagents", "prototyping"] as const;
 
 type ProjectPrivilegedFlag = typeof PROJECT_PRIVILEGED_FLAGS[number];
@@ -2298,17 +2574,33 @@ function projectPrivilegedDefaultsMessage(resolved: ResolvedWorkshopConfig, rawP
 	if (!flags.length || !resolved.projectConfigPath) return undefined;
 	return [
 		`Project config ${resolved.projectConfigPath} enables privileged workshop mode(s) without explicit per-run flags: ${flags.join(", ")}.`,
-		`Re-run with explicit flags (${flags.map((flag) => flag === "prototyping" ? "--prototype" : flag === "expertSubagents" ? "--expert-subagents" : "--local-bash").join(", ")}) or explicit --no-* flags, or use --profile/--workshop intentionally, to proceed without this project-default confirmation.`,
+		`These project-derived privileges must be confirmed by the local user; project config cannot grant trusted execution on its own.`,
 		`${commandName} fails closed in non-interactive mode for these project-derived privileges.`,
 	].join("\n");
 }
 
+function enabledPrivilegedModes(resolved: ResolvedWorkshopConfig): ProjectPrivilegedFlag[] {
+	return PROJECT_PRIVILEGED_FLAGS.filter((flag) => (resolved.params as any)[flag] === true);
+}
+
+function privilegedElevationMessage(resolved: ResolvedWorkshopConfig, _rawParams: Partial<WorkshopInput>, commandName = "/workshop"): string | undefined {
+	const flags = enabledPrivilegedModes(resolved);
+	if (!flags.length) return undefined;
+	const projectNotice = projectPrivilegedDefaultsMessage(resolved, _rawParams, commandName);
+	return [
+		`${commandName} would enable privileged workshop mode(s): ${flags.join(", ")}.`,
+		"Slash commands are a UX surface, not a proof of human provenance; confirm that you intend to grant local-user authority for this run.",
+		"localBash/prototype/expert-subagent modes may expose environment credentials or mutate files if the child model/tool does so.",
+		projectNotice ? `\nProject-config note:\n${projectNotice}` : undefined,
+	].filter((line): line is string => Boolean(line)).join("\n");
+}
+
 async function confirmProjectPrivilegedDefaults(ctx: any, resolved: ResolvedWorkshopConfig, rawParams: Partial<WorkshopInput>, commandName = "/workshop"): Promise<string | undefined> {
-	const message = projectPrivilegedDefaultsMessage(resolved, rawParams, commandName);
+	const message = privilegedElevationMessage(resolved, rawParams, commandName);
 	if (!message) return undefined;
-	if (!ctx.hasUI) return message;
-	const ok = await ctx.ui.confirm("Confirm project workshop privileges", `${message}\n\nAllow this run to proceed?`);
-	return ok ? undefined : `${message}\n\nUser declined project-config privileged defaults.`;
+	if (!ctx.hasUI) return `${message}\n\nNon-interactive privileged runs fail closed unless a future user-global trust setting is added.`;
+	const ok = await ctx.ui.confirm("Confirm privileged workshop run", `${message}\n\nAllow this run to proceed?`);
+	return ok ? undefined : `${message}\n\nUser declined privileged workshop mode(s).`;
 }
 
 async function preflightWorkshop(pi: ExtensionAPI, ctx: any, params: WorkshopInput): Promise<{ ok: boolean; critical: string[]; warnings: string[]; content: string }> {
@@ -2317,6 +2609,7 @@ async function preflightWorkshop(pi: ExtensionAPI, ctx: any, params: WorkshopInp
 	const webResearch = Boolean(resolvedParams.webResearch);
 	const localBash = Boolean(resolvedParams.localBash);
 	const allTools = new Set((pi.getAllTools?.() ?? []).map((tool: any) => String(tool.name)));
+	const models = resolveWorkshopModels(ctx, resolvedParams);
 	const critical: string[] = [];
 	const warnings: string[] = [];
 	try {
@@ -2330,10 +2623,20 @@ async function preflightWorkshop(pi: ExtensionAPI, ctx: any, params: WorkshopInp
 	if (webResearch) {
 		for (const tool of WEB_RESEARCH_TOOLS.split(",")) if (!allTools.has(tool)) critical.push(`webResearch requested but tool is unavailable: ${tool}`);
 	}
-	if ((resolvedParams.subagents || resolvedParams.expertSubagents) && !allTools.has("subagent")) critical.push("subagents requested but the subagent tool is unavailable");
+	if (resolvedParams.expertSubagents && !allTools.has("subagent")) critical.push("expertSubagents requested but the subagent tool is unavailable");
 	if (localBash && !allTools.has("bash")) critical.push("localBash requested but bash tool is unavailable");
-	for (const model of [resolvedParams.strongModel, resolvedParams.plannerModel, resolvedParams.expertModel, resolvedParams.juniorModel, resolvedParams.synthModel]) {
-		if (!modelExists(ctx, model)) warnings.push(`Configured model was not found in the current model registry: ${model}`);
+	if (resolvedParams.prototyping && !allTools.has(PROTOTYPE_TOOL)) critical.push(`${PROTOTYPE_TOOL} requested but the tool is unavailable`);
+	if (!models.strongModel) critical.push(missingStrongModelGuidance());
+	if (models.unknownModels.length) {
+		const message = `Configured provider-qualified model ID(s) not found in the current model registry: ${models.unknownModels.join(", ")}`;
+		if (ctx.hasUI) warnings.push(`${message}; /workshop will ask for confirmation before starting.`);
+		else critical.push(`${message}. Non-interactive runs fail closed; use pi --list-models or run in the UI to confirm.`);
+	}
+	const privileged = enabledPrivilegedModes(resolved);
+	if (privileged.length) {
+		const message = `Privileged mode(s) enabled: ${privileged.join(", ")}. These run with local user authority and require UI confirmation unless a future user-global trust setting is added.`;
+		if (ctx.hasUI) warnings.push(message);
+		else critical.push(`${message} Non-interactive privileged runs fail closed.`);
 	}
 	const workshopsRoot = path.join(resolveMaybe(ctx.cwd, resolvedParams.cwd ?? "."), ".pi", "workshops");
 	try {
@@ -2353,6 +2656,11 @@ async function preflightWorkshop(pi: ExtensionAPI, ctx: any, params: WorkshopInp
 		`Local bash: ${localBash ? "enabled" : "disabled"}`,
 		`Subagents: ${resolvedParams.subagents ? "parent briefs" : "off"}; expert direct: ${resolvedParams.expertSubagents ? "enabled" : "disabled"}`,
 		`Prototyping: ${resolvedParams.prototyping ? "enabled (artifact-contained, not sandboxed)" : "disabled"}`,
+		"Output: cwd-local .pi/workshops/<run> (absolute/symlink escapes rejected)",
+		"Home-directory download scan: disabled",
+		"",
+		"## Model resolution",
+		...modelResolutionLines(models).map((line) => `- ${line}`),
 		"",
 		"## Critical",
 		...(critical.length ? critical.map((item) => `- ${item}`) : ["- none"]),
@@ -2531,6 +2839,8 @@ export default function piWorkshop(pi: ExtensionAPI) {
 			const safeParams = await restrictAssistantContextPaths(ctx, sanitizePublicWorkshopParams(params as PublicWorkshopInput));
 			const preflight = await preflightWorkshop(pi, ctx, safeParams);
 			if (!preflight.ok) throw new Error(`workshop preflight failed:\n${preflight.critical.join("\n")}`);
+			const unknownModels = resolveWorkshopModels(ctx, safeParams).unknownModels;
+			if (unknownModels.length) throw new Error(`workshop preflight failed: unknown model ID(s) require explicit UI confirmation: ${unknownModels.join(", ")}`);
 			const result = await runWorkshop(
 				pi,
 				safeParams,
@@ -2617,6 +2927,11 @@ export default function piWorkshop(pi: ExtensionAPI) {
 			pi.sendMessage({ customType: "pi-workshop", content: `# Workshop blocked\n\n${projectPrivilegeBlock}`, display: true, details: { projectPrivilegeBlock, resolved: resolvedForUi } });
 			return;
 		}
+		const unknownModelBlock = await confirmUnknownConfiguredModels(ctx, resolvedForUi.params, "/workshop");
+		if (unknownModelBlock) {
+			pi.sendMessage({ customType: "pi-workshop", content: `# Workshop blocked\n\n${unknownModelBlock}`, display: true, details: { unknownModelBlock, resolved: resolvedForUi } });
+			return;
+		}
 		const keepDashboard = Boolean(resolvedForUi.params.keepDashboard);
 		const dashboard = createDashboardState();
 		latestDashboard = dashboard;
@@ -2649,7 +2964,8 @@ export default function piWorkshop(pi: ExtensionAPI) {
 			);
 			pi.sendMessage({ customType: "pi-workshop", content: result.summary, display: true, details: result });
 		} catch (error) {
-			pi.sendMessage({ customType: "pi-workshop", content: `# Workshop failed\n\n${String((error as Error)?.stack ?? error)}`, display: true, details: { error: String((error as Error)?.message ?? error) } });
+			const message = String((error as Error)?.message ?? error);
+			pi.sendMessage({ customType: "pi-workshop", content: `# Workshop failed\n\n${message}`, display: true, details: { error: message } });
 		} finally {
 			if (activeWorkshop?.controller === controller) activeWorkshop = undefined;
 			ctx.ui.setStatus("pi-workshop", undefined);
@@ -2679,10 +2995,18 @@ export default function piWorkshop(pi: ExtensionAPI) {
 				return;
 			}
 			const projectPrivilegeNotice = projectPrivilegedDefaultsMessage(resolved, configPreviewParams, "/workshop");
+			let checkReport: Awaited<ReturnType<typeof preflightWorkshop>> | undefined;
+			try {
+				if (parsed.check) checkReport = await preflightWorkshop(pi, ctx, { ...configPreviewParams, idea: "config preview" });
+			} catch (error) {
+				const message = `Workshop config preflight error: ${String((error as Error)?.message ?? error)}`;
+				pi.sendMessage({ customType: "pi-workshop", content: `# ${message}`, display: true, details: { error: message, resolved } });
+				return;
+			}
 			const content = [
 				parsed.check ? "# Pi workshop config check" : "# Pi workshop config",
 				"",
-				parsed.check ? "Config validation: **ok**" : "",
+				parsed.check ? `Config validation: **ok**; preflight: **${checkReport?.ok ? "ok" : "blocked"}**` : "",
 				`Config files: ${resolved.configPaths.length ? resolved.configPaths.join(", ") : "built-in defaults only"}`,
 				`Project config: ${resolved.projectConfigPath ?? "none"}`,
 				`Profile: ${resolved.profile ?? "none"}`,
@@ -2698,6 +3022,9 @@ export default function piWorkshop(pi: ExtensionAPI) {
 				JSON.stringify(resolved.limits, null, 2),
 				"```",
 				"",
+				parsed.check && checkReport ? "## Preflight" : "",
+				parsed.check && checkReport ? checkReport.content : "",
+				"" ,
 				"Config locations checked:",
 				`- ${path.join(os.homedir(), ".pi", "agent", "pi-workshop.config.json")}`,
 				`- nearest project .pi/pi-workshop.config.json from ${ctx.cwd}`,
@@ -2754,7 +3081,7 @@ export default function piWorkshop(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("workshop-observatory", {
-		description: "Open a navigable inspector for the active/latest workshop: experts, subagents, tool events, and downloaded files",
+		description: "Open a navigable inspector for the active/latest workshop: experts, briefs, tool events, and saved artifact files",
 		handler: async (_args, ctx) => openWorkshopObservatory(ctx, latestDashboard, (requestRender) => { observatoryRefresh = requestRender; }),
 	});
 
@@ -2859,6 +3186,11 @@ export default function piWorkshop(pi: ExtensionAPI) {
 				pi.sendMessage({ customType: "pi-workshop", content: `# Workshop pickup blocked\n\n${projectPrivilegeBlock}`, display: true, details: { projectPrivilegeBlock, resolved: resolvedForUi } });
 				return;
 			}
+			const unknownModelBlock = await confirmUnknownConfiguredModels(ctx, resolvedForUi.params, "/workshop-pickup");
+			if (unknownModelBlock) {
+				pi.sendMessage({ customType: "pi-workshop", content: `# Workshop pickup blocked\n\n${unknownModelBlock}`, display: true, details: { unknownModelBlock, resolved: resolvedForUi } });
+				return;
+			}
 			const keepDashboard = Boolean(resolvedForUi.params.keepDashboard);
 			const dashboard = createDashboardState();
 			latestDashboard = dashboard;
@@ -2891,7 +3223,8 @@ export default function piWorkshop(pi: ExtensionAPI) {
 				);
 				pi.sendMessage({ customType: "pi-workshop", content: result.summary, display: true, details: result });
 			} catch (error) {
-				pi.sendMessage({ customType: "pi-workshop", content: `# Workshop pickup failed\n\n${String((error as Error)?.stack ?? error)}`, display: true, details: { error: String((error as Error)?.message ?? error) } });
+				const message = String((error as Error)?.message ?? error);
+				pi.sendMessage({ customType: "pi-workshop", content: `# Workshop pickup failed\n\n${message}`, display: true, details: { error: message } });
 			} finally {
 				if (activeWorkshop?.controller === controller) activeWorkshop = undefined;
 				ctx.ui.setStatus("pi-workshop", undefined);
