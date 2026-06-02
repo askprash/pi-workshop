@@ -62,6 +62,10 @@ assert.ok(index.includes('observedFiles'), 'manifest records only explicit obser
 assert.ok(!index.includes('path.join(os.homedir(), "Downloads")'), 'code does not scan home Downloads');
 assert.ok(!readme.includes('~/Downloads'), 'README does not document home Downloads scanning');
 assert.ok(index.includes('ToolAuditEvent'), 'child tool events are tracked for observability');
+assert.ok(index.includes('Workshop Q&A') && index.includes('questionHelperSystemPrompt'), 'question UI supports inline answers plus helper-agent clarification');
+assert.ok(!index.includes('Type your answer or clarification here.'), 'question UI does not prefill deletable placeholder answer text');
+assert.ok(index.includes('Start typing your answer…'), 'question UI renders placeholder as a hint outside saved answer text');
+assert.ok(index.includes('Current synthesis / resolution context'), 'question helper receives current synthesis context');
 assert.ok(index.includes('writeRunManifest'), 'manifest writer is present');
 assert.ok(index.includes('redactSensitiveForAudit'), 'tool-event audit previews redact sensitive fields');
 assert.ok(index.includes('argsPreview: previewUnknown(redactSensitiveForAudit('), 'tool-event args are redacted before manifest/dashboard preview');

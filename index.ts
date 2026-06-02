@@ -1089,51 +1089,333 @@ ${await fileSection("artifact", args.roundFiles)}
 	return reportPath;
 }
 
-async function askUserForQuestions(ctx: any, round: number, questions: string[], answersPath: string): Promise<boolean> {
-	if (!ctx.hasUI || questions.length === 0) return false;
-	const answers: string[] = [];
-	const answered = new Set<number>();
-	const labelsForQuestions = () => [
-		...questions.map((q, i) => `${answered.has(i) ? "✓" : "Q"}${i + 1}: ${q.slice(0, 90)}`),
-		"Other / additional comments",
-		answers.length ? "Done — save answers" : "Skip for now",
-	];
-	while (true) {
-		const labels = labelsForQuestions();
-		const choice = typeof ctx.ui.select === "function"
-			? await ctx.ui.select(`Pi workshop round ${round}: answer or clarify`, labels)
-			: undefined;
-		if (!choice) {
-			const prefill = questions.map((q, i) => `Q${i + 1}: ${q}\nA${i + 1}: `).join("\n\n");
-			const answer = await ctx.ui.editor(
-				`Pi workshop round ${round}: answer blocking questions (optional)`,
-				`${prefill}\n\nOther / additional comments:\n\nLeave blank/close to skip. Your answers become authoritative.`,
-			);
-			if (!answer?.trim()) return false;
-			answers.push(answer.trim());
-			break;
-		}
-		if (choice === "Skip for now" || choice === "Done — save answers") break;
-		const other = choice === "Other / additional comments";
-		const index = other ? -1 : Math.max(0, Number(choice.match(/^[Q✓](\d+):/)?.[1] ?? "1") - 1);
-		const prompt = other ? "Other / additional comments" : questions[index];
-		const existing = other ? "" : answers.find((entry) => entry.startsWith(`### Q${index + 1}:`))?.split("\n\n").slice(1).join("\n\n") ?? "";
-		const answer = await ctx.ui.editor(
-			other ? `Round ${round}: other comments` : `Round ${round}: Q${index + 1}`,
-			`${prompt}\n\n${existing || "Type your answer or clarification here."}`,
-		);
-		if (!answer?.trim()) continue;
-		if (other) {
-			answers.push(`### Other / additional comments\n\n${answer.trim()}`);
-		} else {
-			answered.add(index);
-			const heading = `### Q${index + 1}: ${questions[index]}`;
-			const replacement = `${heading}\n\n${answer.trim()}`;
-			const existingIndex = answers.findIndex((entry) => entry.startsWith(heading));
-			if (existingIndex >= 0) answers[existingIndex] = replacement;
-			else answers.push(replacement);
-		}
+type QuestionHelperMessage = { role: "user" | "assistant"; text: string };
+type QuestionAnswerDialogResult = { answers: string[]; other: string };
+type QuestionAnswerDialogState = {
+	selected: number;
+	answers: string[];
+	other: string;
+	mode: "answer" | "helper";
+	helperInput: string;
+	helperBusy: boolean;
+	helperError?: string;
+	helperChats: Map<number, QuestionHelperMessage[]>;
+};
+
+type AskUserForQuestionsArgs = {
+	ctx: any;
+	round: number;
+	questions: string[];
+	answersPath: string;
+	idea: string;
+	synthesisText: string;
+	baseCwd: string;
+	model: string;
+	workshopDir: string;
+	signal?: AbortSignal;
+	timeoutMs?: number;
+	onToolEvent?: (event: ToolAuditEvent) => void;
+};
+
+function currentQuestionLabel(questions: string[], selected: number): string {
+	return selected >= questions.length ? "Other / additional comments" : `Q${selected + 1}`;
+}
+
+function currentQuestionText(questions: string[], selected: number): string {
+	return selected >= questions.length ? "Other / additional comments" : questions[selected] ?? "";
+}
+
+function currentQuestionAnswer(state: QuestionAnswerDialogState, questions: string[]): string {
+	return state.selected >= questions.length ? state.other : state.answers[state.selected] ?? "";
+}
+
+function setQuestionAnswerAtIndex(state: QuestionAnswerDialogState, questions: string[], selected: number, answer: string): void {
+	if (selected >= questions.length) state.other = answer;
+	else state.answers[selected] = answer;
+}
+
+function setCurrentQuestionAnswer(state: QuestionAnswerDialogState, questions: string[], answer: string): void {
+	setQuestionAnswerAtIndex(state, questions, state.selected, answer);
+}
+
+function anyQuestionAnswer(state: QuestionAnswerDialogState): boolean {
+	return state.answers.some((answer) => answer.trim()) || Boolean(state.other.trim());
+}
+
+function previousCodepoint(text: string): string {
+	return Array.from(text).slice(0, -1).join("");
+}
+
+function printableInput(data: string): string {
+	if (!data || data.startsWith("\x1b")) return "";
+	return data.replace(/\r/g, "\n").replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
+}
+
+function questionHelperSystemPrompt(): string {
+	return `# Workshop question clarification helper
+
+You are a small helper agent embedded in pi-workshop's user-question interface. Your job is to help the human understand a workshop blocking question and convert the human's clarification into a concise authoritative answer.
+
+Rules:
+- Use the supplied current synthesis/resolution context as the primary source for why the question is being asked.
+- Do not invent product decisions for the user.
+- If chatting, explain what decision/evidence would unblock the workshop and ask focused follow-up questions only when necessary.
+- If asked to summarize/inject, return only the answer text to place in user-answers.md; no markdown heading, no preamble.`;
+}
+
+function questionHelperTranscript(messages: QuestionHelperMessage[]): string {
+	return messages.map((message) => `${message.role === "user" ? "User" : "Helper"}: ${message.text}`).join("\n\n") || "(no clarification chat yet)";
+}
+
+async function runQuestionHelper(args: AskUserForQuestionsArgs, selected: number, messages: QuestionHelperMessage[], userMessage: string, mode: "chat" | "summary"): Promise<string> {
+	const targetQuestion = currentQuestionText(args.questions, selected);
+	const existingAnswers = args.questions
+		.map((question, index) => `Q${index + 1}: ${question}`)
+		.join("\n");
+	const task = mode === "summary"
+		? "Summarize the clarification chat as the concise authoritative answer to inject for the target question. Return only that answer text."
+		: "Answer the user's latest clarification request. Help them understand what the workshop needs and why this question matters.";
+	const userPrompt = `${task}
+
+Original workshop idea:
+${args.idea}
+
+Current synthesis / resolution context:
+<synthesis>
+${args.synthesisText.slice(0, 24_000)}
+</synthesis>
+
+Open questions from the synthesizer:
+${existingAnswers}
+
+Target question (${currentQuestionLabel(args.questions, selected)}):
+${targetQuestion}
+
+Clarification chat so far:
+${questionHelperTranscript(messages)}
+
+Latest user message:
+${userMessage}`;
+	const run = await runChildPi({
+		name: `question-helper-r${args.round}-${currentQuestionLabel(args.questions, selected).toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+		systemPrompt: questionHelperSystemPrompt(),
+		userPrompt,
+		cwd: args.baseCwd,
+		model: args.model,
+		tools: DEFAULT_TOOLS,
+		noSkills: true,
+		noContextFiles: true,
+		signal: args.signal,
+		timeoutMs: args.timeoutMs,
+		phase: "question_helper",
+		round: args.round,
+		runDir: args.workshopDir,
+		onToolEvent: args.onToolEvent,
+	});
+	if (run.exitCode !== 0 || run.timedOut || run.aborted) {
+		throw new Error(run.text.trim() || run.stderr.trim() || `question helper exited ${run.exitCode}`);
 	}
+	return run.text.trim();
+}
+
+function wrapPlainLines(text: string, width: number): string[] {
+	return text.split("\n").flatMap((line) => wrapTextWithAnsi(line || " ", Math.max(8, width)));
+}
+
+function renderQuestionList(questions: string[], state: QuestionAnswerDialogState, height: number, width: number, theme: any): string[] {
+	const rows: string[] = [];
+	const total = questions.length + 1;
+	state.selected = clampIndex(state.selected, total);
+	const start = Math.max(0, Math.min(state.selected - Math.floor(height / 2), Math.max(0, total - height)));
+	for (let offset = 0; offset < Math.min(total, height); offset++) {
+		const i = start + offset;
+		const selected = i === state.selected;
+		const label = currentQuestionLabel(questions, i);
+		const text = currentQuestionText(questions, i);
+		const answer = i >= questions.length ? state.other : state.answers[i] ?? "";
+		const status = answer.trim() ? theme.fg("success", "✓") : theme.fg("muted", "○");
+		const prefix = selected ? theme.fg("accent", "› ") : "  ";
+		const line = prefix + status + " " + theme.fg(selected ? "accent" : "muted", `${label}: `) + truncateToWidth(text, Math.max(8, width - 8), "…");
+		rows.push(selected ? theme.bg("selectedBg", padAnsi(line, width)) : truncateToWidth(line, width, "…"));
+	}
+	return rows;
+}
+
+function renderAnswerPane(questions: string[], state: QuestionAnswerDialogState, height: number, width: number, theme: any): string[] {
+	const question = currentQuestionText(questions, state.selected);
+	const answer = currentQuestionAnswer(state, questions);
+	const rows: string[] = [];
+	rows.push(theme.fg("accent", theme.bold(currentQuestionLabel(questions, state.selected))) + theme.fg("muted", " — answer directly, or Tab for helper chat"));
+	rows.push(...wrapPlainLines(question, width).slice(0, 4).map((line) => theme.fg("text", line)));
+	rows.push(theme.fg("borderMuted", "─".repeat(Math.max(0, width))));
+	rows.push(theme.fg("muted", "Answer"));
+	const answerWithCursor = answer
+		? `${answer}${theme.fg("accent", "▌")}`
+		: `${theme.fg("dim", "Start typing your answer…")}${theme.fg("accent", "▌")}`;
+	rows.push(...wrapPlainLines(answerWithCursor, width));
+	return rows.slice(0, height);
+}
+
+function renderHelperPane(questions: string[], state: QuestionAnswerDialogState, height: number, width: number, theme: any): string[] {
+	const messages = state.helperChats.get(state.selected) ?? [];
+	const rows: string[] = [];
+	rows.push(theme.fg("accent", theme.bold(`Helper chat for ${currentQuestionLabel(questions, state.selected)}`)) + theme.fg("muted", "  Tab/Ctrl+S inject summary • Esc back"));
+	rows.push(...wrapPlainLines(currentQuestionText(questions, state.selected), width).slice(0, 3));
+	rows.push(theme.fg("borderMuted", "─".repeat(Math.max(0, width))));
+	for (const message of messages.slice(-8)) {
+		const speaker = message.role === "user" ? theme.fg("accent", "You") : theme.fg("success", "Helper");
+		rows.push(`${speaker}:`);
+		rows.push(...wrapPlainLines(message.text, width).slice(0, 8).map((line) => `  ${line}`));
+	}
+	if (state.helperBusy) rows.push(theme.fg("warning", "● helper agent thinking…"));
+	if (state.helperError) rows.push(theme.fg("error", `Helper error: ${state.helperError}`));
+	rows.push(theme.fg("borderMuted", "─".repeat(Math.max(0, width))));
+	const input = state.helperInput
+		? `${state.helperInput}${theme.fg("accent", "▌")}`
+		: `${theme.fg("dim", "Ask what this question means, or what answer would unblock it…")}${theme.fg("accent", "▌")}`;
+	rows.push(theme.fg("muted", "Message") + " " + input);
+	return rows.slice(Math.max(0, rows.length - height));
+}
+
+function renderQuestionAnswerDialog(questions: string[], state: QuestionAnswerDialogState, round: number, theme: any, width: number, height: number): string[] {
+	if (width <= 0 || height <= 0) return [];
+	const w = width;
+	const h = Math.max(1, height);
+	const inner = Math.max(0, w - 2);
+	const lines: string[] = [];
+	lines.push(frameRule(theme.fg("accent", ` ✦ ${theme.bold("Workshop Q&A")} `), theme.fg("muted", ` round ${round} `), w, theme, { leftCorner: "╭", rightCorner: "╮", color: "borderAccent" }));
+	lines.push(frameContent(theme.fg("muted", "Type answers directly • Enter next/save • Tab helper agent • Ctrl+S save • Esc skip/back"), w, theme));
+	const bodyRows = Math.max(0, h - 4);
+	if (state.mode === "helper") {
+		const helperRows = renderHelperPane(questions, state, bodyRows, inner, theme);
+		for (let i = 0; i < bodyRows; i++) lines.push(frameContent(helperRows[i] ?? "", w, theme));
+	} else if (w >= 96) {
+		const leftW = Math.min(56, Math.max(34, Math.floor((inner - 1) * 0.38)));
+		const rightW = Math.max(0, inner - leftW - 1);
+		lines.push(splitRule(w, leftW, rightW, theme));
+		const remaining = Math.max(0, h - lines.length - 1);
+		const listRows = renderQuestionList(questions, state, remaining, leftW, theme);
+		const answerRows = renderAnswerPane(questions, state, remaining, rightW, theme);
+		for (let i = 0; i < remaining; i++) lines.push(splitContent(listRows[i] ?? "", answerRows[i] ?? "", leftW, rightW, theme));
+	} else {
+		const answerRows = renderAnswerPane(questions, state, bodyRows, inner, theme);
+		for (let i = 0; i < bodyRows; i++) lines.push(frameContent(answerRows[i] ?? "", w, theme));
+	}
+	const bottom = frameRule(theme.fg("muted", ` ${questions.length} question${questions.length === 1 ? "" : "s"} `), theme.fg(anyQuestionAnswer(state) ? "success" : "dim", anyQuestionAnswer(state) ? " answers ready " : " no answers yet "), w, theme, { leftCorner: "╰", rightCorner: "╯", color: "borderAccent" });
+	if (lines.length >= h) return [...lines.slice(0, h - 1), bottom].map((line) => truncateToWidth(line, w, ""));
+	while (lines.length < h - 1) lines.push(frameContent("", w, theme));
+	lines.push(bottom);
+	return lines.map((line) => truncateToWidth(line, w, ""));
+}
+
+async function askUserForQuestions(args: AskUserForQuestionsArgs): Promise<boolean> {
+	const { ctx, round, questions, answersPath } = args;
+	if (!ctx.hasUI || questions.length === 0) return false;
+	const result = await ctx.ui.custom<QuestionAnswerDialogResult | null>((tui: any, theme: any, _keybindings: any, done: (result: QuestionAnswerDialogResult | null) => void) => {
+		let closed = false;
+		const requestRender = () => { if (!closed) tui.requestRender(); };
+		const state: QuestionAnswerDialogState = {
+			selected: 0,
+			answers: questions.map(() => ""),
+			other: "",
+			mode: "answer",
+			helperInput: "",
+			helperBusy: false,
+			helperChats: new Map(),
+		};
+		const finish = (value: QuestionAnswerDialogResult | null) => { closed = true; done(value); };
+		const moveNextOrFinish = () => {
+			if (state.selected < questions.length) {
+				const nextUnanswered = state.answers.findIndex((answer, index) => index > state.selected && !answer.trim());
+				if (nextUnanswered >= 0) state.selected = nextUnanswered;
+				else if (state.selected < questions.length - 1) state.selected += 1;
+				else if (anyQuestionAnswer(state)) finish({ answers: [...state.answers], other: state.other });
+			} else if (anyQuestionAnswer(state)) finish({ answers: [...state.answers], other: state.other });
+		};
+		const appendAnswerInput = (text: string) => {
+			const current = currentQuestionAnswer(state, questions);
+			setCurrentQuestionAnswer(state, questions, current + text);
+		};
+		const sendHelperMessage = async (text: string, auto = false) => {
+			if (state.helperBusy || !text.trim()) return;
+			const selected = state.selected;
+			state.helperBusy = true;
+			state.helperError = undefined;
+			const messages = [...(state.helperChats.get(selected) ?? [])];
+			messages.push({ role: "user", text: text.trim() });
+			state.helperChats.set(selected, messages);
+			if (!auto) state.helperInput = "";
+			requestRender();
+			try {
+				const reply = await runQuestionHelper(args, selected, messages, text.trim(), "chat");
+				state.helperChats.set(selected, [...messages, { role: "assistant", text: reply }]);
+			} catch (error) {
+				state.helperError = String((error as Error)?.message ?? error);
+			} finally {
+				state.helperBusy = false;
+				requestRender();
+			}
+		};
+		const openHelper = () => {
+			state.mode = "helper";
+			state.helperInput = "";
+			state.helperError = undefined;
+			if (!(state.helperChats.get(state.selected)?.length)) {
+				void sendHelperMessage("Help me understand why the workshop is asking this question and what kind of answer would unblock the next round.", true);
+			}
+		};
+		const summarizeHelper = async () => {
+			const selected = state.selected;
+			const messages = state.helperChats.get(selected) ?? [];
+			if (state.helperBusy || !messages.length) return;
+			state.helperBusy = true;
+			state.helperError = undefined;
+			requestRender();
+			try {
+				const summary = await runQuestionHelper(args, selected, messages, "Summarize this clarification chat as my authoritative answer to the target question.", "summary");
+				setQuestionAnswerAtIndex(state, questions, selected, summary);
+				if (state.selected === selected) state.mode = "answer";
+			} catch (error) {
+				state.helperError = String((error as Error)?.message ?? error);
+			} finally {
+				state.helperBusy = false;
+				requestRender();
+			}
+		};
+		return {
+			render: (width: number) => renderQuestionAnswerDialog(questions, state, round, theme, width, Number(tui?.terminal?.rows ?? 24)),
+			invalidate: () => {},
+			dispose: () => { closed = true; },
+			handleInput: (data: string) => {
+				if (state.mode === "helper") {
+					if (matchesKey(data, Key.escape)) { state.mode = "answer"; requestRender(); return; }
+					if (matchesKey(data, Key.tab) || matchesKey(data, Key.ctrl("s"))) { void summarizeHelper(); return; }
+					if (matchesKey(data, Key.enter)) { void sendHelperMessage(state.helperInput); return; }
+					if (matchesKey(data, Key.backspace)) state.helperInput = previousCodepoint(state.helperInput);
+					else if (matchesKey(data, Key.ctrl("u"))) state.helperInput = "";
+					else state.helperInput += printableInput(data);
+					requestRender();
+					return;
+				}
+				if (matchesKey(data, Key.escape)) { finish(null); return; }
+				if (matchesKey(data, Key.ctrl("s"))) { finish(anyQuestionAnswer(state) ? { answers: [...state.answers], other: state.other } : null); return; }
+				if (matchesKey(data, Key.tab)) { openHelper(); requestRender(); return; }
+				if (matchesKey(data, Key.up)) { state.selected = Math.max(0, state.selected - 1); requestRender(); return; }
+				if (matchesKey(data, Key.down)) { state.selected = Math.min(questions.length, state.selected + 1); requestRender(); return; }
+				if (matchesKey(data, Key.shift("enter"))) { appendAnswerInput("\n"); requestRender(); return; }
+				if (matchesKey(data, Key.enter)) { moveNextOrFinish(); requestRender(); return; }
+				if (matchesKey(data, Key.backspace)) { setCurrentQuestionAnswer(state, questions, previousCodepoint(currentQuestionAnswer(state, questions))); requestRender(); return; }
+				if (matchesKey(data, Key.ctrl("u"))) { setCurrentQuestionAnswer(state, questions, ""); requestRender(); return; }
+				const text = printableInput(data);
+				if (text) { appendAnswerInput(text); requestRender(); }
+			},
+		};
+	}, { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", row: 0, col: 0, margin: 0 } });
+	if (!result) return false;
+	const answers = result.answers
+		.map((answer, index) => answer.trim() ? `### Q${index + 1}: ${questions[index]}\n\n${answer.trim()}` : undefined)
+		.filter((entry): entry is string => Boolean(entry));
+	if (result.other.trim()) answers.push(`### Other / additional comments\n\n${result.other.trim()}`);
 	if (!answers.length) return false;
 	await writeFileQueued(answersPath, `${await fs.readFile(answersPath, "utf8").catch(() => "")}\n\n## Round ${round} user answers\n\n${answers.join("\n\n")}\n`);
 	return true;
@@ -1550,7 +1832,20 @@ async function runWorkshop(
 		if (params.interactive && questions.length) {
 			pauseGlobalTimer();
 			try {
-				userAnswered = await askUserForQuestions(ctx, round, questions, answersPath);
+				userAnswered = await askUserForQuestions({
+					ctx,
+					round,
+					questions,
+					answersPath,
+					idea: params.idea,
+					synthesisText: synth.text,
+					baseCwd,
+					model: juniorModel,
+					workshopDir,
+					signal: runSignal,
+					timeoutMs: childTimeoutMs,
+					onToolEvent: emitToolEvent,
+				});
 			} finally {
 				startGlobalTimer();
 			}

@@ -129,7 +129,9 @@ Interactive slash workshops show a framed live observatory widget with expert bo
 /workshop-observatory
 ```
 
-or `Ctrl+Alt+W`. The full-screen view has a top-left `✦ Observatory` title, an outer border, a phase/progress ribbon, and split Index/Detail panes. Use arrow keys to select or scroll, Enter/→ for detail focus, ←/Backspace for the index, PageUp/PageDown for larger jumps, Esc to close, and `t` to toggle activity/thinking visibility. User-question rounds use a per-question Q&A flow plus **Other / additional comments**; answers are written to `user-answers.md` and treated as authoritative in later rounds.
+or `Ctrl+Alt+W`. The full-screen view has a top-left `✦ Observatory` title, an outer border, a phase/progress ribbon, and split Index/Detail panes. Use arrow keys to select or scroll, Enter/→ for detail focus, ←/Backspace for the index, PageUp/PageDown for larger jumps, Esc to close, and `t` to toggle activity/thinking visibility.
+
+User-question rounds now open a full-screen **Workshop Q&A** surface. Select a question and type the answer directly — placeholders are dim hints, not text you need to delete. Press Enter to move to the next question/save when done, Ctrl+S to save, or Tab to open a small clarification helper agent seeded with the current synthesis/resolution context. In helper chat, ask what the question means, then press Tab/Ctrl+S to summarize that chat back into the selected answer. Answers are written to `user-answers.md` and treated as authoritative in later rounds.
 
 ## Scratch/prototype mode
 
