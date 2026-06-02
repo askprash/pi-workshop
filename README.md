@@ -71,18 +71,20 @@ Cancel an active run:
 
 ## Registered commands/tools
 
-- `/workshop [--profile workshop] [--rounds 4] [--web-research] [--local-bash] [--subagents] [--expert-subagents] [--prototype] [--html-report] [--fixed-experts] [--keep-dashboard] [--observatory] <idea>`
+- `/workshop [--profile workshop] [--rounds 4] [--web-research] [--local-bash] [--subagents] [--expert-subagents] [--prototype] [--html-report] [--fixed-experts] [--keep-dashboard] [--observatory] <idea>` — with no args, opens an interactive settings wizard before the idea editor
 - `/workshop-config [--profile workshop] [--check]` — validate config and show shared preflight/model resolution
 - `/workshop-doctor [same flags as /workshop]` — preflight tools, models, config, and artifact permissions
 - `/workshop-cancel` — abort the active slash workshop
 - `/workshop-hide` — hide the observatory widget
 - `/workshop-observatory` / `Ctrl+Alt+W` — inspect experts, direct brief runners, tool events, and saved artifact files
 - `/workshop-sessions` — pick a previous session and show its saved resolution
-- `/workshop-pickup [--rounds 2] [--web-research] [session-dir or instructions]` — continue a previous session
+- `/workshop-pickup [--rounds 2] [--web-research] [session-dir or instructions]` — continue a previous session; with no args, opens the same settings wizard before session selection
 - `workshop` tool for the assistant — restricted public schema
 - `workshop_scratch` tool — prototype scratchpad for active workshop experts only; local shell execution, not a sandbox
 
 ## Default safety model
+
+When `/workshop` or `/workshop-pickup` is invoked with no arguments in the interactive TUI, pi-workshop first asks whether to use the resolved defaults or configure per-run settings. The wizard can set rounds, web research, panel planning, parent subagent briefs, expert direct subagents, prototyping/scratch, local bash, HTML report generation, observatory launch, and dashboard persistence.
 
 The assistant-callable `workshop` tool does not expose `cwd`, `outputDir`, custom tools/models, `localBash`, `expertSubagents`, `prototyping`, or privileged profiles. Assistant context paths must exist and realpath-resolve inside the current cwd.
 

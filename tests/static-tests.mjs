@@ -52,11 +52,16 @@ assert.ok(index.includes('process.kill(-proc.pid'), 'child process group cleanup
 assert.ok(index.includes('Unknown /workshop flag'), 'unknown slash flags are rejected');
 assert.ok(index.includes('workshop-cancel'), 'cancel command is registered');
 assert.ok(index.includes('workshop-doctor'), 'doctor command is registered');
+assert.ok(index.includes('promptSlashWorkshopLaunchSettings'), 'empty slash workshop commands open interactive settings wizard');
+assert.ok(index.includes('Use these defaults') && index.includes('Configure interactively'), 'settings wizard can accept defaults or configure options');
+assert.ok(index.includes('Parent subagent briefs (--subagents)') && index.includes('HTML report (--html-report)') && index.includes('Prototype scratchpad (--prototype)'), 'settings wizard exposes subagents, report, and prototyping toggles');
 assert.ok(index.includes('workshop-observatory'), 'navigable observatory command is registered');
 assert.ok(index.includes('--open-observatory'), 'slash workflow can open observatory at run start');
 assert.equal(config.defaults.openObservatory, false, 'example config documents openObservatory default');
 assert.ok(index.includes('Ctrl+Alt+W') || index.includes('ctrlAlt("w")'), 'observatory shortcut is documented/registered');
 assert.ok(index.includes('✦ ${theme.bold("Observatory")}') && index.includes('renderObservatoryMode'), 'observatory has branded full-screen renderer');
+assert.ok(index.includes('outputPreviewFromText(run.text)'), 'observatory subagent output preview uses multi-line child output excerpts');
+assert.ok(index.includes('function extractVerdict') && index.includes('function extractStatus') && index.includes('function isConverged'), 'HTML report/pickup helpers are defined');
 assert.ok(index.includes('width: "100%"') && index.includes('maxHeight: "100%"') && index.includes('row: 0') && index.includes('col: 0'), 'observatory opens as a full-screen overlay');
 assert.ok(index.includes('observedFiles'), 'manifest records only explicit observed artifact files');
 assert.ok(!index.includes('path.join(os.homedir(), "Downloads")'), 'code does not scan home Downloads');
@@ -107,6 +112,7 @@ assert.ok(!index.includes('/run ${agentSpec}'), 'parent briefs do not invoke glo
 assert.ok(!index.includes('tools: "subagent"'), 'parent briefs do not use subagent tool');
 assert.ok(readme.includes('Assistant context paths must exist and realpath-resolve inside the current cwd'), 'README documents assistant context path restriction');
 assert.ok(readme.includes('requires UI confirmation'), 'README documents privileged confirmation');
+assert.ok(readme.includes('interactive settings wizard'), 'README documents empty slash-command settings wizard');
 assert.ok(readme.includes('public beta with safe defaults'), 'README uses public beta safe-defaults branding');
 assert.ok(!readme.includes('safe beta') && !readme.includes('Safe-beta'), 'README no longer uses safe-beta branding');
 assert.ok(!readme.includes('.scratch-policy.json` nonce'), 'README no longer says scratch policy contains plaintext nonce');

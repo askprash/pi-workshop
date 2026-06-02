@@ -284,6 +284,36 @@ function firstMeaningfulLine(text: string, max = 220): string {
 	return text.split("\n").map((line) => line.trim()).find(Boolean)?.slice(0, max) ?? "";
 }
 
+function outputPreviewFromText(text: string, maxLines = 16, maxChars = 2400): string {
+	const lines = text.replace(/\r\n/g, "\n").split("\n");
+	let start = lines.findIndex((line) => line.trim().length > 0);
+	if (start < 0) return "";
+	const first = lines[start]!.trim();
+	if (/^#{1,6}\s+/.test(first) && /\b(evidence\s+brief|brief|subagent\s+thread|report)\b/i.test(first)) {
+		start += 1;
+		while (start < lines.length && !lines[start]!.trim()) start += 1;
+	}
+
+	const preview: string[] = [];
+	let chars = 0;
+	for (let i = start; i < lines.length; i++) {
+		let line = lines[i]!.replace(/\s+$/g, "");
+		if (!line.trim()) {
+			if (preview.length && preview[preview.length - 1] !== "") preview.push("");
+			continue;
+		}
+		if (line.length > 220) line = `${line.slice(0, 219)}…`;
+		if (chars + line.length + 1 > maxChars || preview.filter((item) => item.trim()).length >= maxLines) {
+			preview.push("…");
+			break;
+		}
+		preview.push(line);
+		chars += line.length + 1;
+	}
+	while (preview.length && !preview[preview.length - 1]!.trim()) preview.pop();
+	return preview.join("\n").trim() || firstMeaningfulLine(text);
+}
+
 async function observedFileFromPath(filePath: string, source: ObservedFile["source"], owner?: string, phase?: string, round?: number): Promise<ObservedFile> {
 	const stat = await fs.stat(filePath).catch(() => undefined);
 	return {
@@ -1013,7 +1043,7 @@ async function runExpertAssistantBrief(args: {
 				exitCode: run.exitCode,
 				timedOut: run.timedOut,
 				aborted: run.aborted,
-				outputPreview: firstMeaningfulLine(run.text),
+				outputPreview: outputPreviewFromText(run.text),
 				...parsedPaths,
 			},
 		});
@@ -1057,6 +1087,18 @@ function hasStrictSynthesisStatus(text: string): boolean {
 
 function parseConverged(text: string): boolean {
 	return /^CONVERGED:\s*YES\s*$/im.test(text);
+}
+
+function extractStatus(text: string): ResolutionStatus | undefined {
+	return text.match(/^STATUS:\s*(ACCEPT|ITERATE|REJECT|ILL_POSED|UNRESOLVED|DEGRADED|FAILED|CANCELLED)\s*$/im)?.[1] as ResolutionStatus | undefined;
+}
+
+function extractVerdict(text: string): ResolutionStatus | undefined {
+	return text.match(/^VERDICT:\s*(ACCEPT|ITERATE|REJECT|ILL_POSED|UNRESOLVED|DEGRADED|FAILED|CANCELLED)\s*$/im)?.[1] as ResolutionStatus | undefined;
+}
+
+function isConverged(text: string): boolean {
+	return parseConverged(text);
 }
 
 function extractQuestions(text: string): string[] {
@@ -1768,7 +1810,7 @@ tr:last-child td{border-bottom:none;}
 .ledger-details-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:12px;}
 .raw-details>summary{display:flex;align-items:center;gap:10px;padding:12px 16px;background:var(--card);border:1px solid var(--border);border-radius:12px;cursor:pointer;font-weight:700;font-size:14px;color:var(--muted);list-style:none;}
 .raw-details>summary::-webkit-details-marker{display:none;}
-.raw-details>summary::before{content:"\25B6";font-size:10px;transition:transform .2s;}
+.raw-details>summary::before{content:"\\25B6";font-size:10px;transition:transform .2s;}
 .raw-details[open]>summary::before{transform:rotate(90deg);}
 .raw-details>summary:hover{color:var(--fg);}
 .raw-artifact-list{display:grid;gap:12px;margin-top:14px;}
@@ -3776,6 +3818,147 @@ async function confirmProjectPrivilegedDefaults(ctx: any, resolved: ResolvedWork
 	return ok ? undefined : `${message}\n\nUser declined privileged workshop mode(s).`;
 }
 
+function enabledSettingText(value: unknown): string {
+	return value ? "enabled" : "disabled";
+}
+
+function formatResolvedWorkshopSettings(resolved: ResolvedWorkshopConfig): string {
+	const p = resolved.params;
+	return [
+		`Profile: ${resolved.profile ?? "none"}`,
+		`Rounds: ${p.rounds ?? DEFAULT_ROUNDS}`,
+		`Web research tools (--web-research): ${enabledSettingText(p.webResearch)}`,
+		`Panel planning (--plan/--fixed-experts): ${p.planExperts === false ? "fixed default experts" : "auto-plan experts"}`,
+		`Parent subagent briefs (--subagents): ${enabledSettingText(p.subagents)}`,
+		`Expert direct subagent tool (--expert-subagents): ${enabledSettingText(p.expertSubagents)}`,
+		`Prototyping scratchpad (--prototype): ${p.prototyping ? "enabled (artifact-contained, not sandboxed)" : "disabled"}`,
+		`Local bash for experts (--local-bash): ${enabledSettingText(p.localBash)}`,
+		`HTML report (--html-report): ${enabledSettingText(p.htmlReport)}`,
+		`Open observatory (--observatory): ${enabledSettingText(p.openObservatory)}`,
+		`Keep dashboard (--keep-dashboard): ${enabledSettingText(p.keepDashboard)}`,
+	].join("\n");
+}
+
+type InteractiveBooleanSettingKey =
+	| "webResearch"
+	| "planExperts"
+	| "subagents"
+	| "expertSubagents"
+	| "prototyping"
+	| "localBash"
+	| "htmlReport"
+	| "openObservatory"
+	| "keepDashboard";
+
+const INTERACTIVE_BOOLEAN_SETTINGS: Array<{ key: InteractiveBooleanSettingKey; label: string; help: string }> = [
+	{
+		key: "webResearch",
+		label: "Web research tools (--web-research)",
+		help: "Grant web/doc/code-search tools to the workshop children when available.",
+	},
+	{
+		key: "planExperts",
+		label: "Auto-plan expert panel (--plan / --fixed-experts)",
+		help: "Enable the panel-designer pass instead of using the fixed default expert pair.",
+	},
+	{
+		key: "subagents",
+		label: "Parent subagent briefs (--subagents)",
+		help: "Run restricted scout/researcher child Pi briefs before each main expert critique.",
+	},
+	{
+		key: "expertSubagents",
+		label: "Expert direct subagent tool (--expert-subagents)",
+		help: "Privileged: let main expert agents call the subagent tool directly.",
+	},
+	{
+		key: "prototyping",
+		label: "Prototype scratchpad (--prototype)",
+		help: "Privileged: give experts workshop_scratch for artifact-contained throwaway experiments. It is not a sandbox.",
+	},
+	{
+		key: "localBash",
+		label: "Local bash for experts (--local-bash)",
+		help: "Privileged: grant main expert agents local shell access in addition to read/search tools.",
+	},
+	{
+		key: "htmlReport",
+		label: "HTML report (--html-report)",
+		help: "Write a polished self-contained report.html artifact at the end of the run.",
+	},
+	{
+		key: "openObservatory",
+		label: "Open observatory (--observatory)",
+		help: "Open the full-screen observatory automatically when the run starts.",
+	},
+	{
+		key: "keepDashboard",
+		label: "Keep dashboard (--keep-dashboard)",
+		help: "Leave the compact workshop dashboard widget visible after the run finishes.",
+	},
+];
+
+async function askInteractiveBooleanSetting(ctx: any, setting: { label: string; help: string }, current: boolean): Promise<boolean | undefined> {
+	const keep = `Keep ${enabledSettingText(current)}`;
+	const enable = "Enable";
+	const disable = "Disable";
+	const cancel = "Cancel configuration";
+	const choice = await ctx.ui.select(
+		`${setting.label}\n${setting.help}\n\nCurrent resolved value: ${enabledSettingText(current)}`,
+		[keep, enable, disable, cancel],
+	);
+	if (!choice || choice === cancel) return undefined;
+	if (choice === enable) return true;
+	if (choice === disable) return false;
+	return current;
+}
+
+async function promptSlashWorkshopLaunchSettings(ctx: any, commandName: "/workshop" | "/workshop-pickup", parsed: ParsedWorkshopCommand): Promise<ParsedWorkshopCommand | undefined> {
+	if (!ctx.hasUI) return parsed;
+	const preview = await resolveWorkshopConfig(ctx.cwd, { ...parsed, idea: "interactive settings preview" });
+	const configure = "Configure interactively";
+	const useDefaults = "Use these defaults";
+	const cancel = "Cancel";
+	const launchChoice = await ctx.ui.select(
+		`${commandName} settings\n\nCurrent resolved defaults:\n${formatResolvedWorkshopSettings(preview)}\n\nPrivileged selections will still require the normal safety confirmation before the run starts.`,
+		[useDefaults, configure, cancel],
+	);
+	if (!launchChoice || launchChoice === cancel) return undefined;
+	if (launchChoice === useDefaults) return parsed;
+
+	const configured: ParsedWorkshopCommand = { ...parsed };
+	const current = preview.params;
+	while (true) {
+		const roundsInput = await ctx.ui.input(
+			`Rounds (1-${preview.limits.maxRounds})`,
+			`Current: ${current.rounds ?? DEFAULT_ROUNDS}; leave blank to keep`,
+		);
+		if (roundsInput === undefined) return undefined;
+		const trimmed = roundsInput.trim();
+		if (!trimmed) break;
+		const rounds = Number(trimmed);
+		if (Number.isInteger(rounds) && rounds >= 1 && rounds <= preview.limits.maxRounds) {
+			configured.rounds = rounds;
+			break;
+		}
+		ctx.ui.notify(`Rounds must be an integer between 1 and ${preview.limits.maxRounds}`, "warning");
+	}
+
+	for (const setting of INTERACTIVE_BOOLEAN_SETTINGS) {
+		const value = await askInteractiveBooleanSetting(ctx, setting, Boolean((current as any)[setting.key]));
+		if (value === undefined) return undefined;
+		(configured as any)[setting.key] = value;
+	}
+
+	const finalPreview = await resolveWorkshopConfig(ctx.cwd, { ...configured, idea: "interactive settings preview" });
+	const start = "Use these settings";
+	const finalChoice = await ctx.ui.select(
+		`${commandName} configured settings\n\n${formatResolvedWorkshopSettings(finalPreview)}\n\nPrivileged modes, if enabled, will be confirmed next.`,
+		[start, cancel],
+	);
+	return finalChoice === start ? configured : undefined;
+}
+
 async function preflightWorkshop(pi: ExtensionAPI, ctx: any, params: WorkshopInput): Promise<{ ok: boolean; critical: string[]; warnings: string[]; content: string }> {
 	const resolved = await resolveWorkshopConfig(resolveMaybe(ctx.cwd, params.cwd ?? "."), params);
 	const resolvedParams = resolved.params;
@@ -4064,6 +4247,20 @@ export default function piWorkshop(pi: ExtensionAPI) {
 			pi.sendMessage({ customType: "pi-workshop", content: `# ${message}`, display: true, details: { error: message } });
 			return;
 		}
+		if (!args.trim() && ctx.hasUI) {
+			try {
+				const configured = await promptSlashWorkshopLaunchSettings(ctx, "/workshop", parsed);
+				if (!configured) {
+					ctx.ui.notify("Workshop canceled before launch", "warning");
+					return;
+				}
+				parsed = configured;
+			} catch (error) {
+				const message = `Workshop interactive settings error: ${String((error as Error)?.message ?? error)}`;
+				pi.sendMessage({ customType: "pi-workshop", content: `# ${message}`, display: true, details: { error: message } });
+				return;
+			}
+		}
 		let idea = parsed.idea;
 		if (!idea) {
 			if (!ctx.hasUI) {
@@ -4208,7 +4405,7 @@ export default function piWorkshop(pi: ExtensionAPI) {
 
 	pi.registerCommand("workshop", {
 		description:
-			"Run a recursive expert workshop. Usage: /workshop [--profile workshop] [--rounds 4] [--web-research] [--local-bash] [--subagents] [--expert-subagents] [--prototype] [--html-report] [--fixed-experts] <idea>",
+			"Run a recursive expert workshop. With no args, opens a settings wizard before the idea editor. Usage: /workshop [--profile workshop] [--rounds 4] [--web-research] [--local-bash] [--subagents] [--expert-subagents] [--prototype] [--html-report] [--fixed-experts] <idea>",
 		handler: async (args, ctx) => runWorkshopCommand(args, ctx),
 	});
 
@@ -4289,7 +4486,7 @@ export default function piWorkshop(pi: ExtensionAPI) {
 
 	pi.registerCommand("workshop-pickup", {
 		description:
-			"Continue from a previous workshop session. Usage: /workshop-pickup [--rounds 2] [--web-research] [optional session-dir or instructions]",
+			"Continue from a previous workshop session. With no args, opens a settings wizard before session selection. Usage: /workshop-pickup [--rounds 2] [--web-research] [optional session-dir or instructions]",
 		handler: async (args, ctx) => {
 			let parsed: ParsedWorkshopCommand;
 			try { parsed = parseWorkshopCommand(args); }
@@ -4298,6 +4495,20 @@ export default function piWorkshop(pi: ExtensionAPI) {
 				ctx.ui.notify(message, "error");
 				pi.sendMessage({ customType: "pi-workshop", content: `# ${message}`, display: true, details: { error: message } });
 				return;
+			}
+			if (!args.trim() && ctx.hasUI) {
+				try {
+					const configured = await promptSlashWorkshopLaunchSettings(ctx, "/workshop-pickup", parsed);
+					if (!configured) {
+						ctx.ui.notify("Workshop pickup canceled before launch", "warning");
+						return;
+					}
+					parsed = configured;
+				} catch (error) {
+					const message = `Workshop pickup interactive settings error: ${String((error as Error)?.message ?? error)}`;
+					pi.sendMessage({ customType: "pi-workshop", content: `# ${message}`, display: true, details: { error: message } });
+					return;
+				}
 			}
 			let targetDir: string | undefined;
 			let extraInstructions = parsed.idea;

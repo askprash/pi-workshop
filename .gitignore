@@ -1,6 +1,6 @@
 node_modules/
 *.tgz
-.pi/workshops/
+.pi/
 plans/
 validation/
 progress.md
