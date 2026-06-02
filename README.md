@@ -198,6 +198,7 @@ pi-workshop does not collect telemetry or phone home. Web research tools, when e
 - Node too old: use Node 20+.
 - Missing model: run `pi --list-models`, then configure `models.strongModel`.
 - Unknown model warning: fix the ID or confirm in the UI for one run.
+- `DEGRADED`: one or more child experts/synthesizers failed strict validation (for example blank output, nonzero exit, timeout, or malformed synthesis status). Later bad output is written as an explicit failure marker and the runner preserves the last reliable synthesis instead of overwriting `resolution.md` with empty text.
 - Non-UI privileged failure: rerun in the TUI and confirm, or disable privileged flags.
 - Artifact permission failure: ensure the repo cwd can write `.pi/workshops/`.
 - Private git auth: use an SSH `git:` install URL and working SSH keys.

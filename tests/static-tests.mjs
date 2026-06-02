@@ -62,6 +62,10 @@ assert.ok(index.includes('observedFiles'), 'manifest records only explicit obser
 assert.ok(!index.includes('path.join(os.homedir(), "Downloads")'), 'code does not scan home Downloads');
 assert.ok(!readme.includes('~/Downloads'), 'README does not document home Downloads scanning');
 assert.ok(index.includes('ToolAuditEvent'), 'child tool events are tracked for observability');
+assert.ok(index.includes('extractAssistantUpdateText'), 'child JSON parsing captures streamed assistant text as fallback');
+assert.ok(index.includes('blockingChildRunIssue') && index.includes('childRunFailureMarkdown'), 'blank/nonzero child outputs are promoted to explicit degraded failure artifacts');
+assert.ok(index.includes('preserving last reliable synthesis'), 'failed later rounds preserve the last reliable synthesis instead of overwriting it');
+assert.ok(index.indexOf('if (synthIssue || malformedSynthesis)') < index.indexOf('await writeFileQueued(workingPath, synth.text)'), 'working resolution is updated only after synthesis strict validation');
 assert.ok(index.includes('Workshop Q&A') && index.includes('questionHelperSystemPrompt'), 'question UI supports inline answers plus helper-agent clarification');
 assert.ok(!index.includes('Type your answer or clarification here.'), 'question UI does not prefill deletable placeholder answer text');
 assert.ok(index.includes('Start typing your answer…'), 'question UI renders placeholder as a hint outside saved answer text');

@@ -220,9 +220,36 @@ function logWarn(context: string, error: unknown): void {
 	}
 }
 
+function textPartsFromContent(content: any, depth = 0): string[] {
+	if (content === undefined || content === null || depth > 4) return [];
+	if (typeof content === "string") return [content];
+	if (Array.isArray(content)) return content.flatMap((part) => textPartsFromContent(part, depth + 1));
+	if (typeof content !== "object") return [];
+	const parts: string[] = [];
+	for (const key of ["text", "output_text", "value"] as const) {
+		const value = content[key];
+		if (typeof value === "string") parts.push(value);
+		else parts.push(...textPartsFromContent(value, depth + 1));
+	}
+	if (content.type === "text_end" && typeof content.content === "string") parts.push(content.content);
+	else if (Array.isArray(content.content) || (content.content && typeof content.content === "object")) parts.push(...textPartsFromContent(content.content, depth + 1));
+	return parts;
+}
+
 function extractAssistantText(message: any): string {
-	if (!message?.content || !Array.isArray(message.content)) return "";
-	return message.content.filter((p: any) => p?.type === "text" && typeof p.text === "string").map((p: any) => p.text).join("\n");
+	if (!message) return "";
+	return [
+		...textPartsFromContent(message.content),
+		...textPartsFromContent(message.output_text),
+		...textPartsFromContent(message.text),
+	].filter((part) => part.trim()).join("\n");
+}
+
+function extractAssistantUpdateText(event: any): string {
+	const assistantEvent = event?.assistantMessageEvent ?? event?.assistant_message_event;
+	return extractAssistantText(assistantEvent?.partial)
+		|| (assistantEvent?.type === "text_end" && typeof assistantEvent.content === "string" ? assistantEvent.content : "")
+		|| extractAssistantText(event?.message ?? event?.assistantMessage ?? event?.assistant_message);
 }
 
 function previewUnknown(value: unknown, max = 800): string | undefined {
@@ -375,6 +402,7 @@ async function runPiJsonPrompt(options: {
 		const invocation = getPiInvocation(args);
 		const proc = spawn(invocation.command, invocation.args, { cwd: options.cwd, shell: false, detached: true, stdio: ["ignore", "pipe", "pipe"] });
 		let stdoutBuffer = "";
+		let latestAssistantText = "";
 		let sigkillTimer: NodeJS.Timeout | undefined;
 		let timeoutTimer: NodeJS.Timeout | undefined;
 		let settled = false;
@@ -382,6 +410,7 @@ async function runPiJsonPrompt(options: {
 			if (settled) return;
 			settled = true;
 			if (stdoutBuffer.trim()) processLine(stdoutBuffer);
+			if (!result.text.trim() && latestAssistantText.trim()) result.text = latestAssistantText;
 			if (timeoutTimer) clearTimeout(timeoutTimer);
 			if (sigkillTimer) clearTimeout(sigkillTimer);
 			options.signal?.removeEventListener("abort", onAbort);
@@ -399,17 +428,17 @@ async function runPiJsonPrompt(options: {
 			if (!line.trim()) return;
 			let event: any;
 			try { event = JSON.parse(line); } catch (error) { logWarn(`runPiJsonPrompt parse line (${options.name})`, error); return; }
-			if (event.type === "message_update" && event.message) {
-				const text = typeof event.message.content === "string" ? event.message.content : extractAssistantText(event.message);
+			if (event.type === "message_update") {
+				const text = extractAssistantUpdateText(event);
+				if (text.trim()) latestAssistantText = text;
 				const preview = firstMeaningfulLine(text, 180);
 				if (preview) options.onActivity?.(preview);
 			}
 			if (event.type === "message_end" && event.message) {
 				const msg = event.message;
-				let text = "";
-				if (typeof msg.content === "string") text = msg.content;
-				else text = extractAssistantText(msg);
+				const text = extractAssistantText(msg);
 				if (text.trim()) result.text = text;
+				else if (msg.role === "assistant" && !result.text.trim() && latestAssistantText.trim()) result.text = latestAssistantText;
 				if (msg.role === "assistant") {
 					result.usage.turns += 1;
 					const usage = msg.usage;
@@ -508,6 +537,7 @@ async function runChildPi(options: {
 			stdio: ["ignore", "pipe", "pipe"],
 		});
 		let stdoutBuffer = "";
+		let latestAssistantText = "";
 		let sigkillTimer: NodeJS.Timeout | undefined;
 		let timeoutTimer: NodeJS.Timeout | undefined;
 		let settled = false;
@@ -540,13 +570,16 @@ async function runChildPi(options: {
 				options.onActivity?.(toolName === "subagent" ? "MAIN EXPERT called subagent tool" : toolName === PROTOTYPE_TOOL ? "ran scratch/prototype experiment" : `tool: ${toolName}`);
 			}
 			if (eventType === "message_update") {
-				const preview = extractAssistantText(event.message ?? event.assistantMessage ?? {}).split("\n").find(Boolean);
+				const text = extractAssistantUpdateText(event);
+				if (text.trim()) latestAssistantText = text;
+				const preview = text.split("\n").find(Boolean);
 				if (preview) options.onActivity?.(preview.slice(0, 120));
 			}
 
 			if (event.type === "message_end" && event.message?.role === "assistant") {
 				const text = extractAssistantText(event.message);
 				if (text.trim()) result.text = text;
+				else if (!result.text.trim() && latestAssistantText.trim()) result.text = latestAssistantText;
 				result.usage.turns += 1;
 				const usage = event.message.usage;
 				if (usage) {
@@ -565,6 +598,7 @@ async function runChildPi(options: {
 			if (settled) return;
 			settled = true;
 			if (stdoutBuffer.trim()) processLine(stdoutBuffer);
+			if (!result.text.trim() && latestAssistantText.trim()) result.text = latestAssistantText;
 			if (timeoutTimer) clearTimeout(timeoutTimer);
 			if (sigkillTimer) clearTimeout(sigkillTimer);
 			options.signal?.removeEventListener("abort", onAbort);
@@ -612,6 +646,20 @@ async function runChildPi(options: {
 	} finally {
 		await fs.rm(systemTempDir, { recursive: true, force: true }).catch((error) => logWarn(`cleanup system prompt temp ${systemTempDir}`, error));
 	}
+}
+
+function blockingChildRunIssue(run: ChildRun, expected: string): string | undefined {
+	const where = `${expected}${run.round ? ` round ${run.round}` : ""} (${run.name})`;
+	if (run.aborted) return `${where} was aborted before a trustworthy result was produced.`;
+	if (run.timedOut) return `${where} timed out before a trustworthy result was produced.`;
+	if (run.exitCode !== 0) return `${where} exited with code ${run.exitCode}.`;
+	if (!run.text.trim()) return `${where} produced no assistant text despite exiting 0; treating this as a failed child run instead of a valid critique/resolution.`;
+	return undefined;
+}
+
+function childRunFailureMarkdown(run: ChildRun, issue: string): string {
+	const stderr = run.stderr.trim() ? `\n\n## STDERR\n\n\`\`\`text\n${run.stderr.trim().slice(0, 4000)}\n\`\`\`` : "";
+	return `# Child run failed\n\n${issue}\n\nThis placeholder is written deliberately so the workshop does not silently create a zero-byte artifact or treat empty output as expert evidence. The runner should preserve the previous reliable synthesis and mark the workshop DEGRADED.\n\n## Run metadata\n\n- Name: ${run.name}\n- Phase: ${run.phase ?? "unknown"}\n- Round: ${run.round ?? "unknown"}\n- Model: ${run.model ?? "unknown"}\n- Exit code: ${run.exitCode}\n- Timed out: ${run.timedOut ? "yes" : "no"}\n- Aborted: ${run.aborted ? "yes" : "no"}\n- Duration ms: ${run.durationMs ?? "unknown"}\n- Assistant turns observed: ${run.usage.turns}\n- Tool events observed: ${run.toolEvents?.length ?? 0}${stderr}\n`;
 }
 
 function intensityRules(intensity: Intensity): string {
@@ -1640,6 +1688,7 @@ async function runWorkshop(
 		onPanelEvent?.({ type: "round_start", round, rounds, experts: experts.map((e) => e.name) });
 		onUpdate?.(`Round ${round}/${rounds}: expert critique`);
 		const assistantBriefs = new Map<string, string[]>();
+		const roundCriticalErrors: string[] = [];
 		if (parentBriefsEnabled) {
 			onUpdate?.(`Round ${round}/${rounds}: assistant subagent briefs`);
 			await Promise.all(experts.map(async (expert) => {
@@ -1684,6 +1733,20 @@ async function runWorkshop(
 					.map((e) => path.join(workshopDir, `round_${round - 1}_${expertArtifactSegment(e)}.md`))
 					.filter((p) => fssync.existsSync(p))
 				: [];
+		const writeExpertCritique = async (expert: ExpertInput, out: string, run: ChildRun) => {
+			recordChildRun(run);
+			const issue = blockingChildRunIssue(run, "Expert critique");
+			const text = issue ? childRunFailureMarkdown(run, issue) : run.text;
+			if (issue) {
+				degraded = true;
+				errors.push(issue);
+				roundCriticalErrors.push(issue);
+			}
+			await writeFileQueued(out, text);
+			onPanelEvent?.({ type: "expert_done", round, name: expert.name, path: out, text });
+			onArtifact?.({ kind: "critique", round, name: expert.name, path: out, text });
+			critiquePaths.push(out);
+		};
 
 		if (round === 1) {
 			await Promise.all(
@@ -1722,11 +1785,7 @@ async function runWorkshop(
 						onActivity: (text) => onPanelEvent?.({ type: "expert_activity", round, name: expert.name, text }),
 						onToolEvent: emitToolEvent,
 					});
-					recordChildRun(run);
-					await writeFileQueued(out, run.text);
-					onPanelEvent?.({ type: "expert_done", round, name: expert.name, path: out, text: run.text });
-					onArtifact?.({ kind: "critique", round, name: expert.name, path: out, text: run.text });
-					critiquePaths.push(out);
+					await writeExpertCritique(expert, out, run);
 				}),
 			);
 		} else {
@@ -1765,16 +1824,20 @@ async function runWorkshop(
 					onActivity: (text) => onPanelEvent?.({ type: "expert_activity", round, name: expert.name, text }),
 					onToolEvent: emitToolEvent,
 				});
-				recordChildRun(run);
-				await writeFileQueued(out, run.text);
-				onPanelEvent?.({ type: "expert_done", round, name: expert.name, path: out, text: run.text });
-				onArtifact?.({ kind: "critique", round, name: expert.name, path: out, text: run.text });
-				critiquePaths.push(out);
+				await writeExpertCritique(expert, out, run);
 			}
 		}
 		if (runSignal.aborted) {
 			status = "CANCELLED";
 			converged = false;
+			break;
+		}
+		if (roundCriticalErrors.length) {
+			status = "DEGRADED";
+			converged = false;
+			critiquePaths.sort();
+			allRoundFiles.push(...critiquePaths);
+			onUpdate?.(`Round ${round}/${rounds}: stopped after critical child-output failure; preserving last reliable synthesis`);
 			break;
 		}
 
@@ -1807,14 +1870,27 @@ async function runWorkshop(
 			onToolEvent: emitToolEvent,
 		});
 		recordChildRun(synth);
-		if (!hasStrictSynthesisStatus(synth.text)) {
+		const synthIssue = blockingChildRunIssue(synth, "Synthesizer");
+		const malformedSynthesis = !synthIssue && !hasStrictSynthesisStatus(synth.text);
+		const synthText = synthIssue ? childRunFailureMarkdown(synth, synthIssue) : synth.text;
+		if (synthIssue) {
+			degraded = true;
+			errors.push(synthIssue);
+		} else if (malformedSynthesis) {
 			degraded = true;
 			errors.push(`Synthesizer returned malformed or incomplete status in round ${round}.`);
 		}
-		await writeFileQueued(synthOut, synth.text);
-		onArtifact?.({ kind: "synthesis", round, name: "synthesizer", path: synthOut, text: synth.text });
-		await writeFileQueued(workingPath, synth.text);
+		await writeFileQueued(synthOut, synthText);
+		onArtifact?.({ kind: "synthesis", round, name: "synthesizer", path: synthOut, text: synthText });
 		allRoundFiles.push(synthOut);
+		if (synthIssue || malformedSynthesis) {
+			status = runSignal.aborted || synth.aborted ? "CANCELLED" : "DEGRADED";
+			converged = false;
+			onPanelEvent?.({ type: "synth_done", round, path: synthOut, text: synthText, status, converged });
+			onUpdate?.(`Round ${round}/${rounds}: synthesis failed strict validation; preserving last reliable synthesis`);
+			break;
+		}
+		await writeFileQueued(workingPath, synth.text);
 		previousSynthesisPath = synthOut;
 		status = parseStatus(synth.text);
 		converged = parseConverged(synth.text);
