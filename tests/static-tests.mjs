@@ -16,6 +16,7 @@ const artifacts = read('artifacts.ts');
 const configSource = read('config.ts');
 const schemas = read('schemas.ts');
 const readme = read('README.md');
+const workshopSkill = read('skills/pi-workshop/SKILL.md');
 const config = JSON.parse(read('pi-workshop.config.example.json'));
 const pkg = JSON.parse(read('package.json'));
 
@@ -26,6 +27,7 @@ assert.ok(pkg.repository.url.includes('github.com/askprash/pi-workshop.git'), 'p
 assert.ok(pkg.bugs.url.includes('github.com/askprash/pi-workshop/issues'), 'package bugs URL points at public GitHub repo');
 assert.ok(pkg.homepage.includes('github.com/askprash/pi-workshop#readme'), 'package homepage points at public GitHub repo');
 assert.equal(pkg.pi.extensions[0], './index.ts', 'package.json exposes index.ts as pi extension');
+assert.equal(pkg.pi.skills[0], './skills', 'package.json exposes bundled pi-workshop skill');
 assert.ok(pkg.keywords.includes('pi-package'), 'package includes pi-package keyword');
 for (const peer of ['@earendil-works/pi-ai', '@earendil-works/pi-coding-agent', '@earendil-works/pi-tui', 'typebox']) {
   assert.equal(pkg.peerDependencies[peer], '*', `Pi-bundled package ${peer} is declared as a wildcard peer dependency`);
@@ -39,6 +41,10 @@ assert.ok(config.profiles['trusted-local'], 'example config uses a non-reserved 
 assert.ok(config.limits.childTimeoutSeconds > 0, 'example config documents child timeout');
 assert.ok(config.limits.globalTimeoutSeconds >= config.limits.childTimeoutSeconds, 'global timeout covers child timeout');
 assert.ok(pkg.files.includes('logic.js'), 'package whitelist includes shared pure logic helpers');
+assert.ok(pkg.files.includes('skills/**/*'), 'package whitelist includes bundled skill docs');
+assert.ok(workshopSkill.includes('name: pi-workshop'), 'bundled skill has pi-workshop frontmatter');
+assert.ok(workshopSkill.includes('assistant-callable `workshop` tool is intentionally restricted'), 'bundled skill explains assistant tool restrictions');
+assert.ok(workshopSkill.includes('--subagents') && workshopSkill.includes('does **not** require the `pi-subagents` package'), 'bundled skill clarifies parent briefs do not require pi-subagents');
 
 const publicSchemaStart = schemas.indexOf('PublicWorkshopParams = Type.Object');
 const publicSchemaEnd = schemas.indexOf('export type ExpertInput', publicSchemaStart);
@@ -126,6 +132,7 @@ assert.ok(readme.includes('public beta with safe defaults'), 'README uses public
 assert.ok(readme.includes('git:github.com/askprash/pi-workshop@v0.1'), 'README install command points at public GitHub repo and v0.1 tag');
 assert.ok(readme.includes('git:github.com/askprash/pi-workshop'), 'README uninstall command points at public GitHub repo');
 assert.ok(readme.includes('declared as optional peer dependencies'), 'README explains Pi-bundled runtime dependencies');
+assert.ok(readme.includes('pi-workshop` packaged skill'), 'README documents agent-discoverable help skill');
 assert.ok(readme.includes('Optional companion packages'), 'README documents optional companion packages');
 assert.ok(readme.includes('--subagents') && readme.includes('does **not** require `pi-subagents`'), 'README clarifies parent briefs do not require pi-subagents');
 assert.ok(readme.includes('--web-research') && readme.includes('pi-web-access'), 'README documents optional web research companion package');
@@ -174,7 +181,7 @@ for (const forbiddenPrefix of ['.pi/', 'plans/', 'validation/', 'worker/']) {
   assert.ok(!packedPaths.some((file) => file.startsWith(forbiddenPrefix)), `package excludes ${forbiddenPrefix}`);
 }
 assert.ok(!packedPaths.includes('progress.md'), 'package excludes progress.md');
-for (const required of ['index.ts', 'config.ts', 'artifacts.ts', 'schemas.ts', 'logic.js', 'pi-workshop.config.example.json', 'README.md', 'LICENSE']) {
+for (const required of ['index.ts', 'config.ts', 'artifacts.ts', 'schemas.ts', 'logic.js', 'pi-workshop.config.example.json', 'skills/pi-workshop/SKILL.md', 'README.md', 'LICENSE']) {
   assert.ok(packedPaths.includes(required), `package includes ${required}`);
 }
 

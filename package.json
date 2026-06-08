@@ -15,7 +15,8 @@
   "homepage": "https://github.com/askprash/pi-workshop#readme",
   "type": "module",
   "pi": {
-    "extensions": ["./index.ts"]
+    "extensions": ["./index.ts"],
+    "skills": ["./skills"]
   },
   "files": [
     "index.ts",
@@ -24,6 +25,7 @@
     "schemas.ts",
     "logic.js",
     "pi-workshop.config.example.json",
+    "skills/**/*",
     "README.md",
     "LICENSE"
   ],

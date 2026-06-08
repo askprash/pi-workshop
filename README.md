@@ -98,6 +98,7 @@ Cancel an active run:
 - `/workshop-pickup [--rounds 2] [--web-research] [session-dir or instructions]` — continue a previous session; with no args, opens the same settings wizard before session selection
 - `workshop` tool for the assistant — restricted public schema
 - `workshop_scratch` tool — prototype scratchpad for active workshop experts only; local shell execution, not a sandbox
+- `pi-workshop` packaged skill — help text agents can load when users ask how/when to use workshop
 
 ## Default safety model
 
