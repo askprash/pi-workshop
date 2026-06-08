@@ -7,12 +7,12 @@
   "author": "Prashanth Prakash",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/prashanthprakash/pi-workshop-extension.git"
+    "url": "git+https://github.com/askprash/pi-workshop.git"
   },
   "bugs": {
-    "url": "https://github.com/prashanthprakash/pi-workshop-extension/issues"
+    "url": "https://github.com/askprash/pi-workshop/issues"
   },
-  "homepage": "https://github.com/prashanthprakash/pi-workshop-extension#readme",
+  "homepage": "https://github.com/askprash/pi-workshop#readme",
   "type": "module",
   "pi": {
     "extensions": ["./index.ts"]
@@ -35,7 +35,7 @@
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": ">=0.74.0",
+    "@earendil-works/pi-tui": "*",
     "typebox": "*"
   },
   "engines": {

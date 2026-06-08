@@ -22,8 +22,15 @@ const pkg = JSON.parse(read('package.json'));
 assert.ok(!fs.existsSync(path.join(root, 'REVIEW.html')), 'stale REVIEW.html has been removed from repo');
 assert.equal(pkg.version, '0.1.0-beta', 'package version uses initial public beta branding');
 assert.ok(!JSON.stringify(pkg).includes('safe-beta') && !JSON.stringify(pkg).includes('TODO'), 'package metadata has no safe-beta branding or TODO comments');
+assert.ok(pkg.repository.url.includes('github.com/askprash/pi-workshop.git'), 'package repository points at public GitHub repo');
+assert.ok(pkg.bugs.url.includes('github.com/askprash/pi-workshop/issues'), 'package bugs URL points at public GitHub repo');
+assert.ok(pkg.homepage.includes('github.com/askprash/pi-workshop#readme'), 'package homepage points at public GitHub repo');
 assert.equal(pkg.pi.extensions[0], './index.ts', 'package.json exposes index.ts as pi extension');
 assert.ok(pkg.keywords.includes('pi-package'), 'package includes pi-package keyword');
+for (const peer of ['@earendil-works/pi-ai', '@earendil-works/pi-coding-agent', '@earendil-works/pi-tui', 'typebox']) {
+  assert.equal(pkg.peerDependencies[peer], '*', `Pi-bundled package ${peer} is declared as a wildcard peer dependency`);
+}
+assert.ok(!pkg.dependencies || Object.keys(pkg.dependencies).length === 0, 'package has no non-Pi runtime dependencies to bundle');
 assert.ok(config.defaults, 'example config has defaults');
 assert.ok(!config.profiles.safe, 'example config does not override immutable built-in safe profile');
 assert.ok(config.profiles['trusted-local'], 'example config uses a non-reserved trusted-local profile for parent briefs');
@@ -114,6 +121,9 @@ assert.ok(readme.includes('Assistant context paths must exist and realpath-resol
 assert.ok(readme.includes('requires UI confirmation'), 'README documents privileged confirmation');
 assert.ok(readme.includes('interactive settings wizard'), 'README documents empty slash-command settings wizard');
 assert.ok(readme.includes('public beta with safe defaults'), 'README uses public beta safe-defaults branding');
+assert.ok(readme.includes('git:github.com/askprash/pi-workshop@v0.1'), 'README install command points at public GitHub repo and v0.1 tag');
+assert.ok(readme.includes('git:github.com/askprash/pi-workshop'), 'README uninstall command points at public GitHub repo');
+assert.ok(readme.includes('declared as peer dependencies'), 'README explains Pi-bundled runtime dependencies');
 assert.ok(!readme.includes('safe beta') && !readme.includes('Safe-beta'), 'README no longer uses safe-beta branding');
 assert.ok(!readme.includes('.scratch-policy.json` nonce'), 'README no longer says scratch policy contains plaintext nonce');
 

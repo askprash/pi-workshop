@@ -11,7 +11,7 @@ This is a **public beta with safe defaults** for trusted local use on **macOS/Li
 Pinned git install (replace the tag only when you intentionally update):
 
 ```bash
-pi install git:github.com/prashanthprakash/pi-workshop-extension@v0.1
+pi install git:github.com/askprash/pi-workshop@v0.1
 ```
 
 Verify it loaded and preflight your model/tool/artifact setup:
@@ -23,7 +23,7 @@ pi -p "/workshop-doctor --rounds 1 --fixed-experts"
 Uninstall:
 
 ```bash
-pi remove git:github.com/prashanthprakash/pi-workshop-extension
+pi remove git:github.com/askprash/pi-workshop
 ```
 
 ### Requirements
@@ -32,6 +32,8 @@ pi remove git:github.com/prashanthprakash/pi-workshop-extension
 - Node 20+
 - `pi` on PATH
 - A Pi model available from the parent session, or `models.strongModel` configured in `~/.pi/agent/pi-workshop.config.json`
+
+Runtime package note: pi-workshop imports only Pi-bundled extension APIs (`@earendil-works/pi-*` and `typebox`), declared as peer dependencies in `package.json`. Optional features such as `--web-research` and direct `subagent` tooling require the corresponding Pi tools/packages to be installed and enabled separately, commonly `pi-web-access` and `pi-subagents`.
 
 If doctor reports no `strongModel`, list models and add a minimal config:
 
