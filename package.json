@@ -1,6 +1,6 @@
 {
   "name": "pi-workshop-extension",
-  "version": "0.2.2-beta",
+  "version": "0.1.0-beta",
   "description": "Public-beta Pi workshop extension for recursive expert ideation with safe defaults and audit artifacts.",
   "keywords": ["pi-package", "pi-extension", "workshop", "agents"],
   "license": "MIT",

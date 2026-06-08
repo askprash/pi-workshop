@@ -20,7 +20,7 @@ const config = JSON.parse(read('pi-workshop.config.example.json'));
 const pkg = JSON.parse(read('package.json'));
 
 assert.ok(!fs.existsSync(path.join(root, 'REVIEW.html')), 'stale REVIEW.html has been removed from repo');
-assert.equal(pkg.version, '0.2.2-beta', 'package version uses public beta branding');
+assert.equal(pkg.version, '0.1.0-beta', 'package version uses initial public beta branding');
 assert.ok(!JSON.stringify(pkg).includes('safe-beta') && !JSON.stringify(pkg).includes('TODO'), 'package metadata has no safe-beta branding or TODO comments');
 assert.equal(pkg.pi.extensions[0], './index.ts', 'package.json exposes index.ts as pi extension');
 assert.ok(pkg.keywords.includes('pi-package'), 'package includes pi-package keyword');

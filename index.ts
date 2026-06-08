@@ -12,7 +12,7 @@ import { resolveWorkshopConfig, definedOnly, type ResolvedWorkshopConfig } from 
 import { safeSegment, expertArtifactSegment, assertUniqueExpertNamesForArtifacts, parsePlannedExperts, selectRequestedProfile } from "./logic.js";
 import { SCRATCH_POLICY_FILE, MANIFEST_FILE, writeFileQueued, listFilesRecursive, writeScratchPolicy, readScratchPolicy, revokeScratchPolicy, validateScratchNonce, ensureDirInsideNoSymlinks, writeScratchFileNoSymlink, writeRunManifest, type ScratchPolicy, type ScratchPolicyHandle } from "./artifacts.ts";
 
-const EXTENSION_VERSION = "0.2.2-beta";
+const EXTENSION_VERSION = "0.1.0-beta";
 const WEB_RESEARCH_TOOLS = "web_search,fetch_content,get_search_content,code_search";
 const PROTOTYPE_TOOL = "workshop_scratch";
 const OUTPUT_CAP_BYTES = 80 * 1024;

@@ -11,7 +11,7 @@ This is a **public beta with safe defaults** for trusted local use on **macOS/Li
 Pinned git install (replace the tag only when you intentionally update):
 
 ```bash
-pi install git:github.com/prashanthprakash/pi-workshop-extension@v0.2.2-beta
+pi install git:github.com/prashanthprakash/pi-workshop-extension@v0.1
 ```
 
 Verify it loaded and preflight your model/tool/artifact setup:
