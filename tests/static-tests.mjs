@@ -29,8 +29,10 @@ assert.equal(pkg.pi.extensions[0], './index.ts', 'package.json exposes index.ts 
 assert.ok(pkg.keywords.includes('pi-package'), 'package includes pi-package keyword');
 for (const peer of ['@earendil-works/pi-ai', '@earendil-works/pi-coding-agent', '@earendil-works/pi-tui', 'typebox']) {
   assert.equal(pkg.peerDependencies[peer], '*', `Pi-bundled package ${peer} is declared as a wildcard peer dependency`);
+  assert.equal(pkg.peerDependenciesMeta[peer]?.optional, true, `Pi-bundled package ${peer} is marked as an optional peer dependency`);
 }
 assert.ok(!pkg.dependencies || Object.keys(pkg.dependencies).length === 0, 'package has no non-Pi runtime dependencies to bundle');
+assert.ok(!JSON.stringify(pkg).includes('pi-subagents') && !JSON.stringify(pkg).includes('pi-web-access'), 'optional companion Pi packages are not bundled or auto-loaded');
 assert.ok(config.defaults, 'example config has defaults');
 assert.ok(!config.profiles.safe, 'example config does not override immutable built-in safe profile');
 assert.ok(config.profiles['trusted-local'], 'example config uses a non-reserved trusted-local profile for parent briefs');
@@ -123,7 +125,11 @@ assert.ok(readme.includes('interactive settings wizard'), 'README documents empt
 assert.ok(readme.includes('public beta with safe defaults'), 'README uses public beta safe-defaults branding');
 assert.ok(readme.includes('git:github.com/askprash/pi-workshop@v0.1'), 'README install command points at public GitHub repo and v0.1 tag');
 assert.ok(readme.includes('git:github.com/askprash/pi-workshop'), 'README uninstall command points at public GitHub repo');
-assert.ok(readme.includes('declared as peer dependencies'), 'README explains Pi-bundled runtime dependencies');
+assert.ok(readme.includes('declared as optional peer dependencies'), 'README explains Pi-bundled runtime dependencies');
+assert.ok(readme.includes('Optional companion packages'), 'README documents optional companion packages');
+assert.ok(readme.includes('--subagents') && readme.includes('does **not** require `pi-subagents`'), 'README clarifies parent briefs do not require pi-subagents');
+assert.ok(readme.includes('--web-research') && readme.includes('pi-web-access'), 'README documents optional web research companion package');
+assert.ok(readme.includes('--expert-subagents') && readme.includes('pi-subagents'), 'README documents optional direct subagent companion package');
 assert.ok(!readme.includes('safe beta') && !readme.includes('Safe-beta'), 'README no longer uses safe-beta branding');
 assert.ok(!readme.includes('.scratch-policy.json` nonce'), 'README no longer says scratch policy contains plaintext nonce');
 

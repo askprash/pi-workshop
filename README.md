@@ -33,7 +33,22 @@ pi remove git:github.com/askprash/pi-workshop
 - `pi` on PATH
 - A Pi model available from the parent session, or `models.strongModel` configured in `~/.pi/agent/pi-workshop.config.json`
 
-Runtime package note: pi-workshop imports only Pi-bundled extension APIs (`@earendil-works/pi-*` and `typebox`), declared as peer dependencies in `package.json`. Optional features such as `--web-research` and direct `subagent` tooling require the corresponding Pi tools/packages to be installed and enabled separately, commonly `pi-web-access` and `pi-subagents`.
+Runtime package note: pi-workshop imports only Pi-bundled extension APIs (`@earendil-works/pi-*` and `typebox`), declared as optional peer dependencies in `package.json`. It has no bundled runtime dependencies.
+
+### Optional companion packages
+
+The safe/default workshop flow does not require any companion package beyond Pi itself.
+
+- `--subagents` does **not** require `pi-subagents`; it runs parent-orchestrated direct restricted child Pi runners.
+- `--web-research` requires web/search tools from your Pi installation, commonly via `pi-web-access`.
+- `--expert-subagents` lets main expert agents call the `subagent` tool directly and therefore requires a provider for that tool, commonly `pi-subagents`. This mode is privileged and off by default.
+
+Install optional companion packages only when you want those features:
+
+```bash
+pi install npm:pi-web-access
+pi install npm:pi-subagents
+```
 
 If doctor reports no `strongModel`, list models and add a minimal config:
 
